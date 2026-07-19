@@ -1,0 +1,36 @@
+{
+  "cookies": {
+    "Session_id": "<your Yandex session cookie — use scripts/extract_chrome_cookies.py>",
+    "yandexuid": "...",
+    "L": "..."
+  },
+  "headers": {},
+  "location": {
+    "lat": 55.755814,
+    "lon": 37.617635,
+    "address_id": null,
+    "label": "Home"
+  },
+  "context": {
+    "depotType": "regular",
+    "currencySign": "₽",
+    "useRetail": true,
+    "deliveryType": "eats_dispatch",
+    "deliveryTimeInfo": { "tariff": "default", "kind": "on_demand" },
+    "additionalData": {
+      "city": "Москва",
+      "street": "Тверская улица",
+      "house": "1",
+      "flat": "10",
+      "entrance": "1",
+      "floor": "1",
+      "comment": ""
+    },
+    "placeId": "",
+    "country": "Россия",
+    "webCity": "213",
+    "locale": "ru-RU"
+  },
+  "base_url": null,
+  "endpoints": {}
+}

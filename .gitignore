@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.env
+# never commit captured session cookies / config
+config.json
+captures/
+db.db
+.venv/
