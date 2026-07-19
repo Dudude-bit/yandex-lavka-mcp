@@ -21,6 +21,7 @@ import asyncio
 import re
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -42,6 +43,7 @@ _DEFAULT_HEADERS = {
 
 _MAX_RETRIES = 2
 _RETRY_BACKOFF_SECONDS = 0.5
+_PRICE_TOLERANCE = 0.01  # RUB; drift beyond this between preview and submit aborts the order
 
 # The anti-CSRF token Lavka's API requires is embedded in the homepage HTML:
 #   <script id="__page_props__-data" ...>{"csrfToken":"...", ...}</script>
@@ -150,7 +152,9 @@ class LavkaClient:
         if match:
             self._csrf_token = match.group(1)
 
-    async def _call(self, name: str, payload: dict[str, Any] | None = None) -> Any:
+    async def _call(
+        self, name: str, payload: dict[str, Any] | None = None, *, retry: bool = True
+    ) -> Any:
         if self._client is None:
             raise LavkaConfigError("Client used outside of an async context.")
         spec = resolve_endpoint(name, self._config.endpoints)
@@ -159,24 +163,26 @@ class LavkaClient:
         if payload is not None and method != "GET":
             kwargs["json"] = payload
 
+        # Non-idempotent writes (placing an order) must NOT be retried: a lost
+        # response on a retried request could submit the order twice.
+        max_retries = _MAX_RETRIES if retry else 0
         await self._ensure_csrf()
         csrf_refreshed = False
-        last_exc: Exception | None = None
-        for attempt in range(_MAX_RETRIES + 1):
+        for attempt in range(max_retries + 1):
             try:
                 resp = await self._client.request(
                     method, spec["path"], headers=self._lavka_headers(), **kwargs
                 )
             except httpx.HTTPError as exc:
-                last_exc = exc
-                if attempt < _MAX_RETRIES:
+                if attempt < max_retries:
                     await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
                     continue
                 raise LavkaApiError(f"Network error calling {name}: {exc}") from exc
 
             if resp.status_code in (401, 403):
                 # A stale CSRF token also shows up as 401 — refresh once and retry
-                # before concluding the session itself is dead.
+                # before concluding the session itself is dead. (Safe even for
+                # non-retry calls: the request never reached a success.)
                 if not csrf_refreshed:
                     csrf_refreshed = True
                     await self._ensure_csrf(force=True)
@@ -185,20 +191,19 @@ class LavkaClient:
                     f"Lavka session is not authorized (HTTP {resp.status_code}). "
                     "Re-capture your Yandex cookies."
                 )
-            if resp.status_code >= 500 and attempt < _MAX_RETRIES:
+            if resp.status_code >= 500 and attempt < max_retries:
                 await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
                 continue
             if resp.status_code >= 400:
+                # Keep the upstream body server-side; don't echo it to the caller.
                 raise LavkaApiError(
-                    f"Lavka API error on {name}: HTTP {resp.status_code} {resp.text[:200]}",
+                    f"Lavka API error on {name}: HTTP {resp.status_code}",
                     status=resp.status_code,
                 )
             try:
                 return resp.json()
             except ValueError as exc:
-                raise LavkaApiError(
-                    f"Non-JSON response from {name}: {resp.text[:200]}"
-                ) from exc
+                raise LavkaApiError(f"Non-JSON response from {name}.") from exc
 
         raise LavkaApiError(f"Failed to call {name}: {last_exc}")
 
@@ -338,21 +343,25 @@ class LavkaClient:
         }
 
     @staticmethod
-    def _current_qty(cart: dict[str, Any], product_id: str) -> int:
+    def _item_id(it: dict[str, Any]) -> Any:
+        return _pick(it, "id", "product_id")
+
+    @classmethod
+    def _current_qty(cls, cart: dict[str, Any], product_id: str) -> int:
         for it in cart.get("items") or []:
-            if isinstance(it, dict) and it.get("id") == product_id:
+            if isinstance(it, dict) and cls._item_id(it) == product_id:
                 try:
                     return int(float(it.get("quantity") or it.get("count") or 0))
                 except (TypeError, ValueError):
                     return 0
         return 0
 
-    @staticmethod
-    def _price_of(cart: dict[str, Any], product_id: str) -> Any:
+    @classmethod
+    def _price_of(cls, cart: dict[str, Any], product_id: str) -> Any:
         """Lavka validates a numeric `price` on every cart write, including
         removals — reuse the price already in the cart for this item."""
         for it in cart.get("items") or []:
-            if isinstance(it, dict) and it.get("id") == product_id:
+            if isinstance(it, dict) and cls._item_id(it) == product_id:
                 return _pick(it, "price", "currentPrice")
         return None
 
@@ -395,9 +404,9 @@ class LavkaClient:
     async def clear_cart(self) -> dict[str, Any]:
         cart = await self._get_cart_raw()
         items = [
-            self._cart_item_body(it.get("id"), 0, _pick(it, "price", "currentPrice"))
+            self._cart_item_body(self._item_id(it), 0, _pick(it, "price", "currentPrice"))
             for it in (cart.get("items") or [])
-            if isinstance(it, dict) and it.get("id")
+            if isinstance(it, dict) and self._item_id(it)
         ]
         if not items:
             return self._normalize_cart(cart)
@@ -464,20 +473,47 @@ class LavkaClient:
             "noDoorCall": False,
         }
 
-    async def place_order(self, *, poll: int = 6) -> dict[str, Any]:
+    async def place_order(
+        self,
+        *,
+        confirmed_total: float | None = None,
+        expected_cart_version: int | None = None,
+        poll: int = 6,
+    ) -> dict[str, Any]:
         """Submit the order (real charge on the on-file card) and poll payment.
 
-        Returns the order id and payment status. If the bank requires 3-D Secure
-        the status is ``wait_user_action`` and ``redirect_url`` is set — the user
-        must open it to finish paying. Body shape captured live 2026-07-19.
+        Re-reads the cart at submit time and ABORTS if it drifted from what was
+        previewed/confirmed — so the card is never charged a total (or a cart
+        version) the user did not approve. Returns the order id and payment
+        status; on 3-D Secure the status is ``wait_user_action`` with a
+        ``redirect_url`` to finish paying. Body shape captured live 2026-07-19.
         """
         cart = await self._get_cart_raw()
+        summary = self._normalize_cart(cart)
+        live_version = cart.get("cartVersion")
+        live_total = summary.get("total")
+
+        # Fail closed on any drift between preview/confirm and now.
+        if expected_cart_version is not None and live_version != expected_cart_version:
+            raise LavkaApiError(
+                "Cart changed since the preview (version "
+                f"{expected_cart_version} → {live_version}). Re-run checkout_preview "
+                "and confirm the new total before ordering."
+            )
+        if confirmed_total is not None and (
+            live_total is None or abs(float(live_total) - float(confirmed_total)) > _PRICE_TOLERANCE
+        ):
+            raise LavkaApiError(
+                f"Cart total changed since you confirmed ({confirmed_total} → {live_total}). "
+                "Re-run checkout_preview and confirm the new total before ordering."
+            )
+
         payment = self._payment_method(cart) or {}
         cashback = cart.get("cashback") if isinstance(cart.get("cashback"), dict) else {}
         depot_id = await self._service_info_depot_id()
         body = {
             "cartId": cart.get("cartId"),
-            "cartVersion": cart.get("cartVersion"),
+            "cartVersion": live_version,
             "flowVersion": _pick(cart, "orderFlowVersion", default="grocery_flow_v1"),
             "position": self._submit_position(depot_id),
             "paymentMethodType": payment.get("type") or "card",
@@ -489,11 +525,17 @@ class LavkaClient:
                 "position": self._position().get("location") or [],
             },
         }
-        raw = await self._call("order_create", body)
+        # Never retry the submit — a lost response could place a second order.
+        raw = await self._call("order_create", body, retry=False)
         data = raw.get("data") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else raw
         order_id = _pick(data or {}, "orderId", "order_id", "id")
+        if not order_id:
+            raise LavkaApiError(
+                "Order submit returned no order id — the order may not have been "
+                "placed. Check the Lavka app before retrying."
+            )
         result: dict[str, Any] = {"order_id": order_id, "payment_status": None, "redirect_url": None}
-        if order_id and poll:
+        if poll:
             payment_state = await self._poll_payment(order_id, attempts=poll)
             result["payment_status"] = payment_state.get("status")
             result["redirect_url"] = payment_state.get("redirect_url")
@@ -520,9 +562,15 @@ class LavkaClient:
         if self._client is None:
             raise LavkaConfigError("Client used outside of an async context.")
         await self._ensure_csrf()
+        safe_id = quote(str(order_id), safe="")
         resp = await self._client.post(
-            f"/api/v1/orders/{order_id}/cancel", json={}, headers=self._lavka_headers()
+            f"/api/v1/orders/{safe_id}/cancel", json={}, headers=self._lavka_headers()
         )
+        if resp.status_code in (401, 403):
+            raise LavkaAuthError(
+                f"Lavka session is not authorized (HTTP {resp.status_code}). "
+                "Re-capture your Yandex cookies."
+            )
         return {"order_id": order_id, "cancelled": resp.status_code < 400, "status_code": resp.status_code}
 
     # -- addresses / geo ---------------------------------------------------

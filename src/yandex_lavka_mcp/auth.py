@@ -59,11 +59,16 @@ class JwksTokenVerifier(TokenVerifier):
         resource_url: str | None,
         audience: str | None,
         required_scopes: list[str],
+        allowed_subjects: list[str] | None = None,
     ) -> None:
         self.issuer = issuer
         self.resource_url = resource_url
         self.audience = audience
         self.required_scopes = required_scopes
+        # Optional allow-list of token `sub`s. When set, only these identities may
+        # call the server — the last line of defence given every request spends
+        # the one deployer's Lavka session.
+        self.allowed_subjects = allowed_subjects or []
         # Imported lazily so the base (stdio) install needs no JWT deps.
         from jwt import PyJWKClient
 
@@ -80,11 +85,15 @@ class JwksTokenVerifier(TokenVerifier):
                 algorithms=["RS256", "RS384", "RS512", "ES256", "ES384"],
                 audience=self.audience if self.audience else None,
                 issuer=self.issuer,
-                options={"verify_aud": bool(self.audience)},
+                # Require an expiry — reject tokens minted without `exp`.
+                options={"verify_aud": bool(self.audience), "require": ["exp"]},
             )
         except Exception:  # noqa: BLE001 - any decode/verify failure = unauthorized
             return None
 
+        subject = claims.get("sub")
+        if self.allowed_subjects and str(subject) not in self.allowed_subjects:
+            return None
         scopes = _scopes_from_claims(claims)
         if self.required_scopes and not set(self.required_scopes).issubset(scopes):
             return None
@@ -114,10 +123,14 @@ def build_token_verifier() -> JwksTokenVerifier | None:
         return None
     jwks_url = os.environ.get("YANDEX_LAVKA_MCP_OAUTH_JWKS_URL") or _discover_jwks_url(issuer)
     scopes = [s for s in (os.environ.get("YANDEX_LAVKA_MCP_OAUTH_SCOPES") or "").split() if s]
+    subjects = [
+        s for s in (os.environ.get("YANDEX_LAVKA_MCP_OAUTH_SUBJECTS") or "").replace(",", " ").split() if s
+    ]
     return JwksTokenVerifier(
         issuer=issuer,
         jwks_url=jwks_url,
         resource_url=os.environ.get("YANDEX_LAVKA_MCP_SERVER_URL"),
         audience=os.environ.get("YANDEX_LAVKA_MCP_OAUTH_AUDIENCE"),
         required_scopes=scopes,
+        allowed_subjects=subjects,
     )

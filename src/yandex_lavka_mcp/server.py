@@ -2,14 +2,17 @@
 
 Money safety: placing an order is split into two tools. ``checkout_preview``
 returns the full summary and charges nothing. ``confirm_order`` performs the
-real charge and refuses unless the caller passes back the exact total shown by
-the most recent preview — so an order can only go through after the user has
-seen, and confirmed, the real amount.
+real charge and refuses unless the caller passes back the exact total from a
+recent preview AND the live cart still matches that preview (same version and
+total) at submit time — so the card is never charged an amount or a cart the
+user did not approve. The "user said yes" step is a convention the model is
+told to honour; the hard, enforced guarantee is the preview/cart match.
 """
 
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -39,6 +42,7 @@ mcp = FastMCP(
 _LAST_PREVIEW: dict[str, Any] = {}
 
 _PRICE_TOLERANCE = 0.01
+_PREVIEW_TTL_SECONDS = 180  # a confirm must follow its preview within this window
 
 
 def _load() -> Config:
@@ -94,6 +98,7 @@ def set_location(
 
     Provide either lat+lon coordinates or a saved address_id. Persists to config.
     """
+    _LAST_PREVIEW.clear()  # location drives catalog/prices; any prior preview is stale
     config = _load()
     config.location = Location(lat=lat, lon=lon, address_id=address_id, label=label)
     if not config.location.is_set():
@@ -333,6 +338,7 @@ async def checkout_preview() -> dict[str, Any]:
         summary = await _with_client(lambda c: c.checkout_preview())
         _LAST_PREVIEW.clear()
         _LAST_PREVIEW.update(summary)
+        _LAST_PREVIEW["_ts"] = time.time()
         return {
             "ok": True,
             "summary": summary,
@@ -349,20 +355,31 @@ async def checkout_preview() -> dict[str, Any]:
 async def confirm_order(confirmed_total: float) -> dict[str, Any]:
     """Place the order and CHARGE the card. Irreversible — real money.
 
-    Only call after: (1) checkout_preview was run, and (2) the user explicitly
-    confirmed the total in chat. Pass the exact total from the latest preview as
-    confirmed_total; the order is refused if it does not match, if no preview was
-    done, or if the cart changed since the preview.
+    Call ONLY after checkout_preview was run and the user explicitly said yes to
+    the previewed total. Pass that exact total as confirmed_total. The order is
+    refused unless: a preview was run recently, confirmed_total matches it, and —
+    critically — the live cart still matches the previewed cart at submit time
+    (same version and total). If anything drifted, nothing is charged and you
+    must preview + confirm again.
 
-    Returns the order id and payment_status. If payment_status is
-    "wait_user_action", the bank requires 3-D Secure: give the user redirect_url
-    to finish paying. Use cancel_order to cancel.
+    Returns the order id and payment_status. "wait_user_action" means the bank
+    requires 3-D Secure — give the user redirect_url to finish paying.
+    cancel_order cancels.
     """
     if not _LAST_PREVIEW:
         return _err(
             LavkaError(
                 "No fresh checkout preview. Run checkout_preview first, show the "
                 "user the total, and confirm before ordering."
+            )
+        )
+    age = time.time() - float(_LAST_PREVIEW.get("_ts") or 0)
+    if age > _PREVIEW_TTL_SECONDS:
+        _LAST_PREVIEW.clear()
+        return _err(
+            LavkaError(
+                "The checkout preview is stale (older than "
+                f"{_PREVIEW_TTL_SECONDS}s). Re-run checkout_preview and confirm again."
             )
         )
     preview_total = _LAST_PREVIEW.get("total")
@@ -376,14 +393,27 @@ async def confirm_order(confirmed_total: float) -> dict[str, Any]:
                 "current amount."
             )
         )
+    expected_version = _LAST_PREVIEW.get("cart_version")
     try:
-        result = await _with_client(lambda c: c.place_order())
+        # place_order re-reads the cart and aborts (charges nothing) if it drifted
+        # from the previewed total/version.
+        result = await _with_client(
+            lambda c: c.place_order(
+                confirmed_total=float(confirmed_total), expected_cart_version=expected_version
+            )
+        )
         _LAST_PREVIEW.clear()
+        status = result.get("payment_status")
         note = None
-        if result.get("payment_status") == "wait_user_action" and result.get("redirect_url"):
+        if status == "wait_user_action" and result.get("redirect_url"):
             note = (
                 "Order created but the bank requires 3-D Secure. Open redirect_url "
                 "to finish paying, or cancel_order to cancel."
+            )
+        elif status not in ("success", "paid", "hold"):
+            note = (
+                f"Order created (payment status: {status}). Payment may not be "
+                "complete — check the Lavka app; cancel_order can cancel."
             )
         return {"ok": True, "order": result, "note": note}
     except Exception as exc:  # noqa: BLE001
@@ -417,7 +447,22 @@ async def active_orders() -> dict[str, Any]:
         return _err(exc)
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
+
+
 def run() -> None:
     # stdio for local clients; streamable-http for a remote (phone/claude.ai) deploy.
     transport = os.environ.get("YANDEX_LAVKA_MCP_TRANSPORT", "stdio")
+    # Fail closed: a network-exposed HTTP transport that can spend real money MUST
+    # be authenticated. Refuse to start otherwise (override only with an explicit
+    # opt-out if you front it with your own auth).
+    exposed = transport != "stdio" and _HOST not in _LOOPBACK_HOSTS
+    opted_out = os.environ.get("YANDEX_LAVKA_MCP_ALLOW_INSECURE") == "1"
+    if exposed and _verifier is None and not opted_out:
+        raise SystemExit(
+            "Refusing to start: transport is network-exposed HTTP but no OAuth is "
+            "configured (this endpoint places real orders). Set "
+            "YANDEX_LAVKA_MCP_OAUTH_ISSUER (see README 'Remote deploy'), or set "
+            "YANDEX_LAVKA_MCP_ALLOW_INSECURE=1 if it's fronted by your own auth."
+        )
     mcp.run(transport=transport)

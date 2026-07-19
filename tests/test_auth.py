@@ -19,13 +19,14 @@ def keypair():
     return key, key.public_key()
 
 
-def _verifier(public_key, *, audience=None, required_scopes=None):
+def _verifier(public_key, *, audience=None, required_scopes=None, allowed_subjects=None):
     v = JwksTokenVerifier(
         issuer=ISSUER,
         jwks_url="https://auth.example.com/jwks",
         resource_url="https://lavka.example.com/mcp",
         audience=audience,
         required_scopes=required_scopes or [],
+        allowed_subjects=allowed_subjects,
     )
 
     class _Key:
@@ -38,6 +39,8 @@ def _verifier(public_key, *, audience=None, required_scopes=None):
 
 def _token(private_key, **claims):
     payload = {"iss": ISSUER, "sub": "user-1", "exp": int(time.time()) + 300, **claims}
+    if payload.get("exp") is None:
+        payload.pop("exp", None)
     return jwt.encode(payload, private_key, algorithm="RS256")
 
 
@@ -77,3 +80,16 @@ async def test_garbage_token_rejected(keypair):
     _, public = keypair
     v = _verifier(public)
     assert await v.verify_token("not-a-jwt") is None
+
+
+async def test_token_without_exp_rejected(keypair):
+    private, public = keypair
+    v = _verifier(public)
+    assert await v.verify_token(_token(private, exp=None)) is None
+
+
+async def test_subject_allowlist(keypair):
+    private, public = keypair
+    v = _verifier(public, allowed_subjects=["allowed-sub"])
+    assert await v.verify_token(_token(private, sub="allowed-sub")) is not None
+    assert await v.verify_token(_token(private, sub="someone-else")) is None

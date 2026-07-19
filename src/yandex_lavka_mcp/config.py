@@ -131,9 +131,11 @@ def load_config() -> Config:
 
 def save_config(config: Config) -> Path:
     path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Create owner-only from the start — the file holds session cookies, so never
+    # let it exist world-readable (even briefly) before a later chmod.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(config.to_dict(), fh, ensure_ascii=False, indent=2)
-    # Owner-only: the file holds session cookies.
-    os.chmod(path, 0o600)
+    os.chmod(path, 0o600)  # in case the file pre-existed with looser perms
     return path
