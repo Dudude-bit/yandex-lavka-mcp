@@ -119,6 +119,56 @@ Claude Desktop (`mcpServers`):
 }
 ```
 
+## Remote deploy (order from your phone)
+
+By default the server speaks **stdio** (local clients). Set
+`YANDEX_LAVKA_MCP_TRANSPORT=streamable-http` to expose it over HTTP so a hosted
+instance can back a [claude.ai custom connector](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+(phone / web).
+
+A prebuilt [`Dockerfile`](Dockerfile) is included. Secrets are injected at
+runtime — never baked into the image:
+
+```bash
+docker build -t yandex-lavka-mcp .
+docker run -p 8000:8000 \
+  -e YANDEX_LAVKA_MCP_CONFIG_JSON="$(cat ~/.config/yandex-lavka-mcp/config.json)" \
+  yandex-lavka-mcp
+```
+
+### Environment variables
+
+| Var | Purpose |
+|-----|---------|
+| `YANDEX_LAVKA_MCP_TRANSPORT` | `stdio` (default) or `streamable-http`. |
+| `YANDEX_LAVKA_MCP_HOST` / `_PORT` | Bind address for HTTP (default `0.0.0.0:8000` in Docker). |
+| `YANDEX_LAVKA_MCP_CONFIG_JSON` | The whole `config.json` as one secret (instead of a file). |
+
+### Authentication (any OIDC provider)
+
+A public endpoint spends real money, so **protect it**. `claude.ai`'s custom
+connector UI only supports **OAuth** (no static bearer / custom header — that
+works only in Claude Code/Desktop). This server is a provider-agnostic OAuth 2.1
+resource server: point it at *any* OpenID-Connect provider (Zitadel, Keycloak,
+Auth0, Google, …) and it validates JWT access tokens against that provider's
+JWKS and advertises it via OAuth protected-resource metadata.
+
+Enable it by installing the `server` extra (`pip install '.[server]'`, already in
+the Docker image) and setting:
+
+| Var | Purpose |
+|-----|---------|
+| `YANDEX_LAVKA_MCP_OAUTH_ISSUER` | Your provider's issuer URL (enables OAuth). |
+| `YANDEX_LAVKA_MCP_SERVER_URL` | Public URL of this MCP server (the resource). |
+| `YANDEX_LAVKA_MCP_OAUTH_AUDIENCE` | Expected token audience (optional). |
+| `YANDEX_LAVKA_MCP_OAUTH_SCOPES` | Space-separated required scopes (optional). |
+| `YANDEX_LAVKA_MCP_OAUTH_JWKS_URL` | Override JWKS URL (optional; else discovered). |
+
+Leave `YANDEX_LAVKA_MCP_OAUTH_ISSUER` unset to run unauthenticated (local only).
+
+> Session cookies expire; when calls start failing, re-capture them and update
+> the `YANDEX_LAVKA_MCP_CONFIG_JSON` secret. There is no headless Yandex login.
+
 ## Develop
 
 ```bash

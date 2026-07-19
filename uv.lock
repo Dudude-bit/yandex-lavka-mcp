@@ -737,9 +737,13 @@ browser = [
     { name = "cryptography" },
 ]
 dev = [
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "respx" },
+]
+server = [
+    { name = "pyjwt", extra = ["crypto"] },
 ]
 
 [package.metadata]
@@ -748,8 +752,10 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", specifier = ">=1.2.0" },
     { name = "pydantic", specifier = ">=2.6" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'dev'", specifier = ">=2.8" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'server'", specifier = ">=2.8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.21" },
 ]
-provides-extras = ["browser", "dev"]
+provides-extras = ["browser", "server", "dev"]

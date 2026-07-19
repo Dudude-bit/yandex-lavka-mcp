@@ -9,15 +9,29 @@ seen, and confirmed, the real amount.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from .auth import build_token_verifier
 from .client import LavkaClient
 from .config import Config, Location, load_config, save_config
 from .errors import LavkaError
 
-mcp = FastMCP("yandex-lavka")
+# Host/port only matter for the HTTP transports; harmless for stdio.
+_HOST = os.environ.get("YANDEX_LAVKA_MCP_HOST", "127.0.0.1")
+_PORT = int(os.environ.get("YANDEX_LAVKA_MCP_PORT", "8000"))
+_verifier = build_token_verifier()
+
+mcp = FastMCP(
+    "yandex-lavka",
+    host=_HOST,
+    port=_PORT,
+    stateless_http=True,
+    token_verifier=_verifier,
+    auth=_verifier.auth_settings() if _verifier else None,
+)
 
 # In-process record of the last checkout preview. confirm_order checks against
 # it so the model cannot place an order it never previewed, and cannot place one
@@ -404,4 +418,6 @@ async def active_orders() -> dict[str, Any]:
 
 
 def run() -> None:
-    mcp.run()
+    # stdio for local clients; streamable-http for a remote (phone/claude.ai) deploy.
+    transport = os.environ.get("YANDEX_LAVKA_MCP_TRANSPORT", "stdio")
+    mcp.run(transport=transport)
