@@ -220,6 +220,80 @@ async def test_place_order_builds_submit_body_and_polls_payment():
     assert body["depotOrderContext"]["depotType"] == "regular"
 
 
+def _order_cart_route(*, version=3, subtotal="100", total="219"):
+    return respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "cartId": "c1",
+                "cartVersion": version,
+                "orderFlowVersion": "grocery_flow_v1",
+                "paymentMethod": {"type": "card", "id": "card-test"},
+                "cashback": {"walletId": "w/abc"},
+                "items": [{"id": "p1", "title": "X", "quantity": "1", "currentPrice": 100}],
+                "totalItemsPrice": subtotal,
+                "totalPriceValue": total,
+                "orderConditions": {"deliveryCost": "119"},
+            },
+        )
+    )
+
+
+@respx.mock
+async def test_place_order_aborts_on_cart_version_drift():
+    # No submit/service-info routes are mocked: the abort must happen BEFORE them.
+    # (If the code wrongly proceeded, respx would raise "not mocked" and the
+    # message assertion below would fail — so this proves nothing was charged.)
+    _mock_homepage()
+    _order_cart_route(version=5)  # live version differs from the previewed 3
+    async with LavkaClient(_config()) as client:
+        with pytest.raises(Exception) as ei:
+            await client.place_order(confirmed_total=219, expected_cart_version=3, poll=0)
+    assert "changed" in str(ei.value).lower()
+
+
+@respx.mock
+async def test_place_order_aborts_on_total_drift():
+    _mock_homepage()
+    _order_cart_route(version=3, total="999")  # live total differs from confirmed 219
+    async with LavkaClient(_config()) as client:
+        with pytest.raises(Exception) as ei:
+            await client.place_order(confirmed_total=219, expected_cart_version=3, poll=0)
+    assert "total changed" in str(ei.value).lower()
+
+
+@respx.mock
+async def test_place_order_errors_when_no_order_id():
+    _mock_homepage()
+    _order_cart_route(version=3, total="219")
+    respx.get("https://lavka.yandex.ru/api/v1/providers/v2/service-info").mock(
+        return_value=httpx.Response(200, json={"depotId": "1"})
+    )
+    respx.post("https://lavka.yandex.ru/api/v1/orders/submit").mock(
+        return_value=httpx.Response(200, json={"data": {}})  # 200 but no orderId
+    )
+    async with LavkaClient(_config()) as client:
+        with pytest.raises(Exception) as ei:
+            await client.place_order(confirmed_total=219, expected_cart_version=3, poll=0)
+    assert "order id" in str(ei.value).lower()
+
+
+@respx.mock
+async def test_order_submit_is_not_retried():
+    _mock_homepage()
+    _order_cart_route(version=3, total="219")
+    respx.get("https://lavka.yandex.ru/api/v1/providers/v2/service-info").mock(
+        return_value=httpx.Response(200, json={"depotId": "1"})
+    )
+    submit = respx.post("https://lavka.yandex.ru/api/v1/orders/submit").mock(
+        side_effect=httpx.ConnectError("boom")
+    )
+    async with LavkaClient(_config()) as client:
+        with pytest.raises(Exception):
+            await client.place_order(confirmed_total=219, expected_cart_version=3, poll=0)
+    assert submit.call_count == 1  # submit must NOT be retried (double-charge risk)
+
+
 @respx.mock
 async def test_cancel_order_posts_to_dynamic_path():
     _mock_homepage()

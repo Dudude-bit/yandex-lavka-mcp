@@ -160,11 +160,14 @@ the Docker image) and setting:
 |-----|---------|
 | `YANDEX_LAVKA_MCP_OAUTH_ISSUER` | Your provider's issuer URL (enables OAuth). |
 | `YANDEX_LAVKA_MCP_SERVER_URL` | Public URL of this MCP server (the resource). |
-| `YANDEX_LAVKA_MCP_OAUTH_AUDIENCE` | Expected token audience (optional). |
+| `YANDEX_LAVKA_MCP_OAUTH_AUDIENCE` | Expected token audience (optional but recommended). |
 | `YANDEX_LAVKA_MCP_OAUTH_SCOPES` | Space-separated required scopes (optional). |
+| `YANDEX_LAVKA_MCP_OAUTH_SUBJECTS` | Allow-list of token `sub`s that may call the server (optional; strongest lock — every request spends *your* Lavka session). |
 | `YANDEX_LAVKA_MCP_OAUTH_JWKS_URL` | Override JWKS URL (optional; else discovered). |
 
-Leave `YANDEX_LAVKA_MCP_OAUTH_ISSUER` unset to run unauthenticated (local only).
+A network-exposed HTTP transport **refuses to start** unless OAuth is configured
+(it spends real money). Set `YANDEX_LAVKA_MCP_ALLOW_INSECURE=1` only if you front
+it with your own auth. Leaving OAuth unset is allowed for loopback/local use.
 
 > Session cookies expire; when calls start failing, re-capture them and update
 > the `YANDEX_LAVKA_MCP_CONFIG_JSON` secret. There is no headless Yandex login.
