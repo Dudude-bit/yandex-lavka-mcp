@@ -102,12 +102,7 @@ class Config:
         }
 
 
-def load_config() -> Config:
-    path = config_path()
-    if not path.exists():
-        return Config()
-    with path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
+def _config_from_dict(data: dict[str, Any]) -> Config:
     context = dict(DEFAULT_CONTEXT)
     context.update(data.get("context") or {})
     return Config(
@@ -118,6 +113,20 @@ def load_config() -> Config:
         base_url=data.get("base_url"),
         endpoints=dict(data.get("endpoints") or {}),
     )
+
+
+def load_config() -> Config:
+    # In a container, inject the whole config as one env var (a Dokploy/K8s
+    # secret) instead of a file on disk.
+    inline = os.environ.get("YANDEX_LAVKA_MCP_CONFIG_JSON")
+    if inline:
+        return _config_from_dict(json.loads(inline))
+    path = config_path()
+    if not path.exists():
+        return Config()
+    with path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    return _config_from_dict(data)
 
 
 def save_config(config: Config) -> Path:
