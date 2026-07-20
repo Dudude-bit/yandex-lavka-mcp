@@ -18,6 +18,7 @@ Configuration (env vars):
 from __future__ import annotations
 
 import os
+import sys
 
 import httpx
 from mcp.server.auth.provider import AccessToken, TokenVerifier
@@ -92,6 +93,10 @@ class JwksTokenVerifier(TokenVerifier):
             return None
 
         subject = claims.get("sub")
+        # Set YANDEX_LAVKA_MCP_LOG_AUTH=1 to print accepted subjects to stderr —
+        # use it once to discover your `sub`, then pin it in OAUTH_SUBJECTS.
+        if os.environ.get("YANDEX_LAVKA_MCP_LOG_AUTH"):
+            print(f"[yandex-lavka-mcp] authenticated subject={subject!r}", file=sys.stderr, flush=True)
         if self.allowed_subjects and str(subject) not in self.allowed_subjects:
             return None
         scopes = _scopes_from_claims(claims)
