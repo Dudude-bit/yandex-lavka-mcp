@@ -263,6 +263,32 @@ async def test_place_order_aborts_on_total_drift():
 
 
 @respx.mock
+async def test_place_order_aborts_when_cart_not_checkoutable():
+    # No submit/service-info mocked: the abort must happen before them.
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "cartId": "c1",
+                "cartVersion": 3,
+                "totalItemsPrice": "100",
+                "totalPriceValue": "100",
+                "availableForCheckout": False,
+                "checkoutUnavailableReason": "quantity-over-limit",
+                "items": [
+                    {"id": "b", "title": "Голубика", "quantity": "2", "currentPrice": 169, "isUnavailableOnDepot": True}
+                ],
+            },
+        )
+    )
+    async with LavkaClient(_config()) as client:
+        with pytest.raises(Exception) as ei:
+            await client.place_order(confirmed_total=100, expected_cart_version=3, poll=0)
+    assert "checkout" in str(ei.value).lower()
+
+
+@respx.mock
 async def test_place_order_errors_when_no_order_id():
     _mock_homepage()
     _order_cart_route(version=3, total="219")
