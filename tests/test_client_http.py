@@ -321,6 +321,24 @@ async def test_order_submit_is_not_retried():
 
 
 @respx.mock
+async def test_add_to_cart_warns_when_item_dropped():
+    # Lavka accepts the write but the item isn't in the resulting cart (dropped
+    # as unavailable) — add_to_cart must warn instead of implying success.
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        return_value=httpx.Response(200, json={"cartId": "c1", "cartVersion": 3, "items": []})
+    )
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/update").mock(
+        return_value=httpx.Response(
+            200, json={"cartId": "c1", "cartVersion": 4, "totalItemsPrice": "0", "totalPriceValue": "0", "items": []}
+        )
+    )
+    async with LavkaClient(_config()) as client:
+        cart = await client.add_to_cart("ghost-id", 1, price=100)
+    assert cart["warning"] and "did not end up" in cart["warning"].lower()
+
+
+@respx.mock
 async def test_add_to_cart_retries_on_409_conflict():
     # A concurrent writer bumped the cart, so our write hits 409; the client must
     # re-read the fresh version and retry rather than surfacing an error.
