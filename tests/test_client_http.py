@@ -295,6 +295,41 @@ async def test_order_submit_is_not_retried():
 
 
 @respx.mock
+async def test_add_to_cart_retries_on_409_conflict():
+    # A concurrent writer bumped the cart, so our write hits 409; the client must
+    # re-read the fresh version and retry rather than surfacing an error.
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        side_effect=[
+            httpx.Response(200, json={"cartId": "c1", "cartVersion": 3, "items": []}),
+            httpx.Response(200, json={"cartId": "c1", "cartVersion": 5, "items": []}),
+        ]
+    )
+    update = respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/update").mock(
+        side_effect=[
+            httpx.Response(409, json={}),  # conflict — cart changed under us
+            httpx.Response(
+                200,
+                json={
+                    "cartId": "c1",
+                    "cartVersion": 6,
+                    "totalItemsPrice": "100",
+                    "totalPriceValue": "100",
+                    "items": [{"id": "p1", "title": "X", "quantity": "1", "currentPrice": 100}],
+                },
+            ),
+        ]
+    )
+    async with LavkaClient(_config()) as client:
+        cart = await client.add_to_cart("p1", 1, price=100)
+    assert cart["cart_version"] == 6
+    assert update.call_count == 2  # retried after the 409
+    # the retry used the freshly-read version (5), not the stale 3
+    body2 = json.loads(update.calls[1].request.content)
+    assert body2["cartVersion"] == 5
+
+
+@respx.mock
 async def test_cancel_order_posts_to_dynamic_path():
     _mock_homepage()
     route = respx.post("https://lavka.yandex.ru/api/v1/orders/ord-9-grocery/cancel").mock(

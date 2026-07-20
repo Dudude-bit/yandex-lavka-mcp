@@ -44,6 +44,13 @@ _DEFAULT_HEADERS = {
 _MAX_RETRIES = 2
 _RETRY_BACKOFF_SECONDS = 0.5
 _PRICE_TOLERANCE = 0.01  # RUB; drift beyond this between preview and submit aborts the order
+_CART_CONFLICT_RETRIES = 3  # re-read + retry on cartVersion 409 (shared-cart concurrency)
+
+# The Lavka cart is ONE shared server-side resource per account. Serialize this
+# process's own cart writes so parallel tool calls don't self-collide on the
+# optimistic-concurrency version; cross-process collisions are handled by the
+# 409 re-read/retry in _cart_mutate.
+_CART_WRITE_LOCK = asyncio.Lock()
 
 # The anti-CSRF token Lavka's API requires is embedded in the homepage HTML:
 #   <script id="__page_props__-data" ...>{"csrfToken":"...", ...}</script>
@@ -376,42 +383,59 @@ class LavkaClient:
             "currency": "RUB",
         }
 
-    async def _write_quantity(
-        self, product_id: str, quantity: int, *, price: float | None
-    ) -> dict[str, Any]:
-        cart = await self._get_cart_raw()
-        if price is None:
-            price = self._price_of(cart, product_id)
-        item = self._cart_item_body(product_id, quantity, price)
-        raw = await self._call("cart_update", self._cart_write_body([item], cart))
-        return self._normalize_cart(raw)
+    async def _cart_mutate(self, build_items) -> dict[str, Any]:
+        """Read-modify-write a cart update, robust to the cart being a single
+        shared server-side resource under optimistic concurrency.
+
+        The cart is guarded by `cartVersion`; a concurrent writer (parallel tool
+        calls, a second session, or the Lavka app) makes our write 409. We
+        serialize our own writes with a process lock, and on a 409 re-read the
+        fresh cart and rebuild the update — so concurrent adds queue up instead
+        of erroring. ``build_items(cart_raw)`` returns the item bodies to send,
+        recomputed from the just-read cart each attempt (None/[] = nothing to do).
+        """
+        async with _CART_WRITE_LOCK:
+            for attempt in range(_CART_CONFLICT_RETRIES + 1):
+                cart = await self._get_cart_raw()
+                items = build_items(cart)
+                if not items:
+                    return self._normalize_cart(cart)
+                try:
+                    raw = await self._call("cart_update", self._cart_write_body(items, cart))
+                    return self._normalize_cart(raw)
+                except LavkaApiError as exc:
+                    if exc.status == 409 and attempt < _CART_CONFLICT_RETRIES:
+                        await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                        continue
+                    raise
+        raise LavkaApiError("cart update failed after conflict retries", status=409)
 
     async def add_to_cart(
         self, product_id: str, quantity: int = 1, *, price: float | None = None
     ) -> dict[str, Any]:
         # cart_update sets an ABSOLUTE quantity, so add = current + delta.
-        cart = await self._get_cart_raw()
-        target = self._current_qty(cart, product_id) + quantity
-        if price is None:
-            price = self._price_of(cart, product_id)
-        item = self._cart_item_body(product_id, target, price)
-        raw = await self._call("cart_update", self._cart_write_body([item], cart))
-        return self._normalize_cart(raw)
+        def build(cart: dict[str, Any]) -> list[dict[str, Any]]:
+            target = self._current_qty(cart, product_id) + quantity
+            p = price if price is not None else self._price_of(cart, product_id)
+            return [self._cart_item_body(product_id, target, p)]
+
+        return await self._cart_mutate(build)
 
     async def set_cart_item(self, product_id: str, quantity: int) -> dict[str, Any]:
-        return await self._write_quantity(product_id, quantity, price=None)
+        def build(cart: dict[str, Any]) -> list[dict[str, Any]]:
+            return [self._cart_item_body(product_id, quantity, self._price_of(cart, product_id))]
+
+        return await self._cart_mutate(build)
 
     async def clear_cart(self) -> dict[str, Any]:
-        cart = await self._get_cart_raw()
-        items = [
-            self._cart_item_body(self._item_id(it), 0, _pick(it, "price", "currentPrice"))
-            for it in (cart.get("items") or [])
-            if isinstance(it, dict) and self._item_id(it)
-        ]
-        if not items:
-            return self._normalize_cart(cart)
-        raw = await self._call("cart_update", self._cart_write_body(items, cart))
-        return self._normalize_cart(raw)
+        def build(cart: dict[str, Any]) -> list[dict[str, Any]]:
+            return [
+                self._cart_item_body(self._item_id(it), 0, _pick(it, "price", "currentPrice"))
+                for it in (cart.get("items") or [])
+                if isinstance(it, dict) and self._item_id(it)
+            ]
+
+        return await self._cart_mutate(build)
 
     # -- checkout / orders -------------------------------------------------
 
