@@ -238,6 +238,9 @@ class LavkaClient:
             "quantity": _pick(item, "quantity", "count", "qty", default=1),
             "price": _to_amount(_pick(item, "currentPrice", "price")),
             "quantity_label": _pick(item, "amount", "weight", default=""),
+            # True = in the cart but NOT orderable from the current depot (it's
+            # only stocked in "Большая Лавка"/supermarket, or sold out here).
+            "unavailable_on_depot": bool(_pick(item, "isUnavailableOnDepot", default=False)),
         }
 
     def _normalize_cart(self, raw: Any) -> dict[str, Any]:
@@ -256,6 +259,10 @@ class LavkaClient:
                 "delivery_fee": 0.0,
                 "total": 0.0,
                 "eta": None,
+                "available_for_checkout": None,
+                "checkout_blocked_reason": None,
+                "unavailable_items": [],
+                "warning": None,
             }
         # Real breakdown from explicit cart fields (not inferred):
         #   total = subtotal - discount + delivery
@@ -267,16 +274,40 @@ class LavkaClient:
         if delivery is None and subtotal is not None and total is not None:
             # Fallback if the explicit field is missing.
             delivery = max(0.0, round(total - subtotal + discount, 2))
+        trimmed = [self._trim_cart_item(it) for it in items]
+        unavailable = [i["title"] for i in trimmed if i.get("unavailable_on_depot")]
+        available_for_checkout = _pick(data, "availableForCheckout")
+        blocked_reason = _pick(data, "checkoutUnavailableReason")
+        # A plain-language warning the model reads and acts on (not just a flag).
+        warning = None
+        if unavailable:
+            warning = (
+                "These items are in the cart but CANNOT be ordered from the current "
+                "store — they exist only in «Большая Лавка» (the big store) or are "
+                f"sold out here: {', '.join(unavailable)}. Remove or replace them "
+                "(update_cart_item(..., 0)) before checkout, or the order will fail."
+            )
+        elif available_for_checkout is False:
+            warning = (
+                "The cart cannot be checked out right now"
+                + (f" (reason: {blocked_reason})" if blocked_reason else "")
+                + ". Fix the flagged items before ordering."
+            )
         return {
             "cart_id": _pick(data, "cartId"),
             "cart_version": _pick(data, "cartVersion"),
-            "items": [self._trim_cart_item(it) for it in items],
+            "items": trimmed,
             "item_count": _pick(data, "totalItemsCount", default=len(items)),
             "subtotal": subtotal,
             "discount": discount,
             "delivery_fee": delivery,
             "total": total,
             "eta": _pick(order_conditions, "eta"),
+            # Ordering-readiness: available_for_checkout False => don't try to order.
+            "available_for_checkout": available_for_checkout,
+            "checkout_blocked_reason": blocked_reason,
+            "unavailable_items": unavailable,
+            "warning": warning,
         }
 
     @staticmethod
@@ -530,6 +561,16 @@ class LavkaClient:
             raise LavkaApiError(
                 f"Cart total changed since you confirmed ({confirmed_total} → {live_total}). "
                 "Re-run checkout_preview and confirm the new total before ordering."
+            )
+        # Don't charge for a cart Lavka won't check out (e.g. items only in
+        # «Большая Лавка», sold out, or over a quantity limit).
+        if cart.get("availableForCheckout") is False:
+            reason = summary.get("checkout_blocked_reason") or "unknown"
+            bad = summary.get("unavailable_items") or []
+            detail = f" Unavailable items: {', '.join(bad)}." if bad else ""
+            raise LavkaApiError(
+                f"Cart is not available for checkout (reason: {reason}).{detail} "
+                "Fix the cart (remove/replace those items) and preview again."
             )
 
         payment = self._payment_method(cart) or {}

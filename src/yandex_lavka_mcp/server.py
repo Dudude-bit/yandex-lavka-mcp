@@ -277,7 +277,16 @@ async def get_product(slug: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def view_cart() -> dict[str, Any]:
-    """Show the current cart contents and running total. Read-only."""
+    """Show the current cart contents and running total. Read-only.
+
+    The cart also reports order-readiness. Watch these:
+    - `warning`: a plain-language problem to fix (or null). If set, act on it.
+    - each item's `unavailable_on_depot`: true = it's in the cart but CANNOT be
+      ordered from the current store (only in «Большая Лавка», or sold out here).
+    - `available_for_checkout`: false = the order can't be placed as-is.
+    Remove/replace flagged items with update_cart_item(product_id, 0) before
+    checkout.
+    """
     try:
         cart = await _with_client(lambda c: c.get_cart())
         return {"ok": True, "cart": cart}
@@ -293,6 +302,11 @@ async def add_to_cart(
 
     `product_id` is the `id` from a search result. Pass `price` from the same
     search result when available (Lavka validates it on cart writes).
+
+    IMPORTANT: search can return items that are only stocked in «Большая Лавка»
+    (a different store) — they add fine but can't be ordered from the current
+    one. After adding, check the returned cart's `warning` and each item's
+    `unavailable_on_depot`; drop any flagged item with update_cart_item(id, 0).
     """
     _LAST_PREVIEW.clear()  # cart changed; any prior preview is stale
     try:
@@ -333,6 +347,10 @@ async def checkout_preview() -> dict[str, Any]:
 
     Charges NOTHING. Show the returned total to the user and ask them to confirm
     it out loud before calling confirm_order. Always run this before confirming.
+
+    If the summary has a `warning`, or `available_for_checkout` is false, or any
+    item has `unavailable_on_depot: true`, the order will be REFUSED — fix the
+    cart (remove/replace those items) and preview again before confirming.
     """
     try:
         summary = await _with_client(lambda c: c.checkout_preview())
