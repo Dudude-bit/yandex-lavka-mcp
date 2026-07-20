@@ -69,6 +69,8 @@ DEFAULT_CONTEXT: dict[str, Any] = {
     "additionalData": {},
     "placeId": "",  # Yandex maps place id (ymapsbm1://...) for the delivery address
     "country": "Россия",
+    "countryIso3": "RUS",  # for payments/v1/methods
+    "paymentMethodId": "",  # chosen card id (set via set_payment_method); else account default
     "webCity": "213",  # Yandex region id (213 = Москва) → X-Lavka-Web-City header
     "locale": "ru-RU",  # → X-Lavka-Web-Locale header
 }

@@ -480,12 +480,60 @@ class LavkaClient:
 
     # -- checkout / orders -------------------------------------------------
 
+    async def list_payment_methods(self) -> dict[str, Any]:
+        """The user's payment methods (cards) + which is the account default."""
+        loc = self._position().get("location") or []
+        raw = await self._call(
+            "payment_methods", {"location": loc, "countryIso3": self._ctx("countryIso3", "RUS")}
+        )
+        raw = raw if isinstance(raw, dict) else {}
+        default = raw.get("defaultMethod") if isinstance(raw.get("defaultMethod"), dict) else {}
+        default_id = default.get("id")
+        out = []
+        for m in raw.get("methods") or []:
+            if not isinstance(m, dict):
+                continue
+            out.append(
+                {
+                    "id": m.get("id"),
+                    "type": m.get("type"),
+                    "label": " ".join(m.get("displayName") or []) or m.get("name"),
+                    "bank": m.get("cardBank"),
+                    "available": bool((m.get("availability") or {}).get("available", True)),
+                    "is_default": m.get("id") == default_id,
+                }
+            )
+        return {"methods": out, "default_id": default_id}
+
+    async def _resolve_payment(self, cart: dict[str, Any]) -> dict[str, Any]:
+        """Pick the card to charge: an explicit config choice, else what's on the
+        cart, else the account default / first available card. The cart's own
+        paymentMethod is null until set, so we must resolve it ourselves."""
+        chosen = self._ctx("paymentMethodId")
+        if chosen:
+            for m in (await self.list_payment_methods()).get("methods") or []:
+                if m.get("id") == chosen:
+                    return {"id": chosen, "type": m.get("type") or "card", "label": m.get("label"), "bank": m.get("bank")}
+            return {"id": chosen, "type": "card"}
+        on_cart = self._payment_method(cart)
+        if on_cart and on_cart.get("id"):
+            return on_cart
+        info = await self.list_payment_methods()
+        methods = info.get("methods") or []
+        pick = next((m for m in methods if m.get("id") == info.get("default_id")), None)
+        pick = pick or next((m for m in methods if m.get("available")), None)
+        if pick:
+            return {"id": pick["id"], "type": pick.get("type") or "card", "label": pick.get("label"), "bank": pick.get("bank")}
+        return {}
+
     async def checkout_preview(self) -> dict[str, Any]:
         """Order summary. Charges nothing — totals come straight from the cart."""
         cart = await self._get_cart_raw()
         summary = self._normalize_cart(cart)
         summary["address"] = self._ctx("additionalData") or None
-        summary["payment_method"] = self._payment_method(cart)
+        # Resolve the card that will actually be charged (cart.paymentMethod is
+        # null until set), so the preview never shows an empty payment method.
+        summary["payment_method"] = await self._resolve_payment(cart) or None
         cashback = cart.get("cashback") if isinstance(cart.get("cashback"), dict) else {}
         summary["cashback_available"] = cashback.get("availableForPayment")
         return summary
@@ -583,7 +631,12 @@ class LavkaClient:
                 "Fix the cart (remove/replace those items) and preview again."
             )
 
-        payment = self._payment_method(cart) or {}
+        payment = await self._resolve_payment(cart)
+        if not payment.get("id"):
+            raise LavkaApiError(
+                "No payment method available. Add a card in the Lavka app, or pick "
+                "one with set_payment_method(card_id) (see list_payment_methods)."
+            )
         cashback = cart.get("cashback") if isinstance(cart.get("cashback"), dict) else {}
         depot_id = await self._service_info_depot_id()
         body = {
