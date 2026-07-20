@@ -448,6 +448,41 @@ async def cancel_order(order_id: str) -> dict[str, Any]:
         return _err(exc)
 
 
+@mcp.tool()
+async def list_payment_methods() -> dict[str, Any]:
+    """List the user's saved cards and which is the default. Read-only.
+
+    Use a returned `id` with set_payment_method to choose which card an order
+    charges. By default the order uses the account default card.
+    """
+    try:
+        info = await _with_client(lambda c: c.list_payment_methods())
+        return {"ok": True, **info}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def set_payment_method(card_id: str) -> dict[str, Any]:
+    """Choose which saved card orders will charge (persists). Pass an `id` from
+    list_payment_methods. Pass an empty string to revert to the account default.
+    """
+    try:
+        chosen = None
+        if card_id:
+            methods = (await _with_client(lambda c: c.list_payment_methods())).get("methods") or []
+            chosen = next((m for m in methods if m.get("id") == card_id), None)
+            if not chosen:
+                labels = [f"{m.get('label')} ({m.get('id')})" for m in methods]
+                return _err(ValueError(f"No such card {card_id!r}. You have: {labels}"))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+    config = _load()
+    config.context["paymentMethodId"] = card_id
+    save_config(config)
+    return {"ok": True, "chosen": chosen or "account default"}
+
+
 # -- orders ----------------------------------------------------------------
 
 

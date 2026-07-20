@@ -374,6 +374,80 @@ async def test_add_to_cart_retries_on_409_conflict():
 
 
 @respx.mock
+async def test_list_payment_methods_trims_and_flags_default():
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/payments/v1/methods").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "methods": [
+                    {"id": "card-1", "type": "card", "displayName": ["MIR", "1384"], "cardBank": "TINKOFF", "availability": {"available": True}},
+                    {"id": "card-2", "type": "card", "displayName": ["MIR", "7482"], "cardBank": "VTB", "availability": {"available": True}},
+                ],
+                "defaultMethod": {"id": "card-1"},
+            },
+        )
+    )
+    async with LavkaClient(_config()) as client:
+        info = await client.list_payment_methods()
+    assert info["default_id"] == "card-1"
+    assert info["methods"][0]["label"] == "MIR 1384"
+    assert info["methods"][0]["is_default"] is True
+    assert info["methods"][1]["is_default"] is False
+
+
+@respx.mock
+async def test_place_order_uses_account_default_card_when_cart_has_none():
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "cartId": "c1", "cartVersion": 3, "orderFlowVersion": "grocery_flow_v1",
+                "totalItemsPrice": "100", "totalPriceValue": "219", "availableForCheckout": True,
+                "items": [{"id": "p1", "title": "X", "quantity": "1", "currentPrice": 100}],
+            },  # note: no paymentMethod on the cart
+        )
+    )
+    respx.post("https://lavka.yandex.ru/api/v1/providers/payments/v1/methods").mock(
+        return_value=httpx.Response(200, json={"methods": [{"id": "card-default", "type": "card", "displayName": ["MIR", "1384"], "availability": {"available": True}}], "defaultMethod": {"id": "card-default"}})
+    )
+    respx.get("https://lavka.yandex.ru/api/v1/providers/v2/service-info").mock(
+        return_value=httpx.Response(200, json={"depotId": "1"})
+    )
+    submit = respx.post("https://lavka.yandex.ru/api/v1/orders/submit").mock(
+        return_value=httpx.Response(200, json={"data": {"orderId": "ord"}})
+    )
+    async with LavkaClient(_config()) as client:
+        result = await client.place_order(confirmed_total=219, expected_cart_version=3, poll=0)
+    assert result["order_id"] == "ord"
+    body = json.loads(submit.calls.last.request.content)
+    assert body["paymentMethodId"] == "card-default"  # auto-resolved from the account default
+
+
+@respx.mock
+async def test_place_order_aborts_when_no_payment_method():
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "cartId": "c1", "cartVersion": 3, "totalItemsPrice": "100", "totalPriceValue": "100",
+                "availableForCheckout": True,
+                "items": [{"id": "p1", "title": "X", "quantity": "1", "currentPrice": 100}],
+            },
+        )
+    )
+    respx.post("https://lavka.yandex.ru/api/v1/providers/payments/v1/methods").mock(
+        return_value=httpx.Response(200, json={"methods": [], "defaultMethod": {}})
+    )
+    async with LavkaClient(_config()) as client:
+        with pytest.raises(Exception) as ei:
+            await client.place_order(confirmed_total=100, expected_cart_version=3, poll=0)
+    assert "payment method" in str(ei.value).lower()
+
+
+@respx.mock
 async def test_cancel_order_posts_to_dynamic_path():
     _mock_homepage()
     route = respx.post("https://lavka.yandex.ru/api/v1/orders/ord-9-grocery/cancel").mock(

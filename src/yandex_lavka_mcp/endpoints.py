@@ -36,6 +36,7 @@ DEFAULT_ENDPOINTS: dict[str, dict[str, str]] = {
     # require 3-D Secure (status "wait_user_action" + redirectUrl).
     "order_create": {"method": "POST", "path": "/api/v1/orders/submit"},
     "payment_status": {"method": "POST", "path": "/api/v1/providers/payments/v1/status"},
+    "payment_methods": {"method": "POST", "path": "/api/v1/providers/payments/v1/methods"},
     # order_cancel path is dynamic (/api/v1/orders/{orderId}/cancel) — built in
     # client.cancel_order, not via this registry.
 }
