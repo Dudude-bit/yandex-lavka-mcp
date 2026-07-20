@@ -179,6 +179,15 @@ uv pip install -e ".[dev]"
 pytest
 ```
 
+## One account = one cart
+
+Lavka keeps a single server-side cart per account, guarded by an optimistic
+`cartVersion`. This server serializes its own cart writes and retries on version
+conflicts, so parallel tool calls in one session are safe. But **don't drive the
+same Yandex account from two places at once** (e.g. this server *and* a second
+MCP session, *and* the Lavka app): they all write the one shared cart, and you'll
+see items from the other writer appear in yours. Use a single client at a time.
+
 ## Security & privacy
 
 - Cookies and address live only in `~/.config/yandex-lavka-mcp/config.json`
