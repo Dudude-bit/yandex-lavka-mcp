@@ -450,7 +450,17 @@ class LavkaClient:
             p = price if price is not None else self._price_of(cart, product_id)
             return [self._cart_item_body(product_id, target, p)]
 
-        return await self._cart_mutate(build)
+        result = await self._cart_mutate(build)
+        # Verify the item actually landed. Lavka silently drops items that turn
+        # out to be unavailable at the current store — the caller must know.
+        if not any(i.get("id") == product_id for i in result.get("items") or []):
+            note = (
+                "This item did NOT end up in the cart — Lavka dropped it (sold out "
+                "at the current store, or only in «Большая Лавка»). Re-add to retry, "
+                "or pick an in-stock alternative; do not assume it was added."
+            )
+            result["warning"] = f"{result['warning']} {note}".strip() if result.get("warning") else note
+        return result
 
     async def set_cart_item(self, product_id: str, quantity: int) -> dict[str, Any]:
         def build(cart: dict[str, Any]) -> list[dict[str, Any]]:
