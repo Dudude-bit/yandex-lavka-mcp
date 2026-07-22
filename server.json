@@ -1,7 +1,7 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Dudude-bit/yandex-lavka-mcp",
-  "description": "Unofficial MCP server for ordering Yandex Lavka groceries from an AI assistant (search, cart, checkout with confirmation).",
+  "description": "Unofficial MCP server for ordering Yandex Lavka groceries: search, cart, checkout.",
   "repository": {
     "url": "https://github.com/Dudude-bit/yandex-lavka-mcp",
     "source": "github"
