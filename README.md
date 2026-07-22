@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.Dudude-bit/yandex-lavka-mcp -->
+
 # yandex-lavka-mcp
 
 [![PyPI](https://img.shields.io/pypi/v/yandex-lavka-mcp.svg)](https://pypi.org/project/yandex-lavka-mcp/)
