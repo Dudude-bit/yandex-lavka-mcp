@@ -1,6 +1,6 @@
 [project]
 name = "yandex-lavka-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Unofficial MCP server for Yandex Lavka: search, cart, and place grocery orders from an AI assistant."
 readme = "README.md"
 requires-python = ">=3.12"
