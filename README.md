@@ -1,5 +1,10 @@
 # yandex-lavka-mcp
 
+[![PyPI](https://img.shields.io/pypi/v/yandex-lavka-mcp.svg)](https://pypi.org/project/yandex-lavka-mcp/)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/MCP-server-black.svg)](https://modelcontextprotocol.io)
+
 An [MCP](https://modelcontextprotocol.io) server that lets an AI assistant order
 groceries from **Yandex Lavka** — search products, build a cart, and place a real
 order — with an explicit human confirmation before any money is charged.
