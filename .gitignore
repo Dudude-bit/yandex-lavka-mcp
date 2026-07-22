@@ -11,3 +11,4 @@ config.json
 captures/
 db.db
 .venv/
+habr-draft.md
