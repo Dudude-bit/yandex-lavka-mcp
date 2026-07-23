@@ -139,9 +139,12 @@ runtime — never baked into the image:
 ```bash
 docker build -t yandex-lavka-mcp .
 docker run -p 8000:8000 \
+  -e YANDEX_LAVKA_MCP_TRANSPORT=streamable-http \
   -e YANDEX_LAVKA_MCP_CONFIG_JSON="$(cat ~/.config/yandex-lavka-mcp/config.json)" \
   yandex-lavka-mcp
 ```
+
+(The image defaults to stdio; the `TRANSPORT` env above switches it to HTTP.)
 
 ### Environment variables
 
