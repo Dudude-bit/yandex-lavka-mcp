@@ -14,8 +14,10 @@ RUN uv pip install --system --no-cache ".[server]"
 RUN useradd --create-home --uid 10001 app
 USER app
 
-ENV YANDEX_LAVKA_MCP_TRANSPORT=streamable-http \
-    YANDEX_LAVKA_MCP_HOST=0.0.0.0 \
+# Defaults to stdio, so a bare `docker run -i` (and MCP introspection tools) get
+# a working server. For a remote deploy, set
+# YANDEX_LAVKA_MCP_TRANSPORT=streamable-http (+ OAuth env) — see README.
+ENV YANDEX_LAVKA_MCP_HOST=0.0.0.0 \
     YANDEX_LAVKA_MCP_PORT=8000
 
 EXPOSE 8000
