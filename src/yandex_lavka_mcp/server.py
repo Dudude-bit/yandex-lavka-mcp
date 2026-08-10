@@ -338,6 +338,23 @@ async def clear_cart() -> dict[str, Any]:
         return _err(exc)
 
 
+@mcp.tool()
+async def set_take_bags(take_bags: bool) -> dict[str, Any]:
+    """Choose whether the order includes a courier bag. No charge.
+
+    Lavka blocks checkout (`available_for_checkout: false`, reason
+    `bad_take_bags`) until this choice is made. checkout_preview makes it
+    automatically using the configured default (no bag); call this only to
+    override — e.g. set_take_bags(True) to add a bag.
+    """
+    _LAST_PREVIEW.clear()  # cart changed; any prior preview is stale
+    try:
+        cart = await _with_client(lambda c: c.set_take_bags(take_bags))
+        return {"ok": True, "cart": cart}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 # -- checkout (two-step) ---------------------------------------------------
 
 

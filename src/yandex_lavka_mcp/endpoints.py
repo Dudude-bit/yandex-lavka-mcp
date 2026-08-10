@@ -21,6 +21,10 @@ DEFAULT_ENDPOINTS: dict[str, dict[str, str]] = {
     # Cart — CONFIRMED
     "cart_get": {"method": "POST", "path": "/api/v1/providers/cart/v1/retrieve"},
     "cart_update": {"method": "POST", "path": "/api/v1/providers/cart/v1/update"},
+    # Carries the courier-bag choice (`takeBags`) — Lavka blocks checkout with
+    # `bad_take_bags` until it's sent. The frontend piggybacks it on the
+    # cashback-flow toggle, so both travel through this one endpoint.
+    "set_cashback_flow": {"method": "POST", "path": "/api/v1/providers/cart/v1/set-cashback-flow"},
     # Checkout — CONFIRMED (page scaffold; order totals come from the cart)
     "checkout_layout": {"method": "POST", "path": "/api/v1/providers/orders/v1/checkout-layout"},
     "set_payment": {"method": "POST", "path": "/api/v1/providers/cart/v1/set-payment"},

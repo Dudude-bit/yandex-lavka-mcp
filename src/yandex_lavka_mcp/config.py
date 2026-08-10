@@ -71,6 +71,7 @@ DEFAULT_CONTEXT: dict[str, Any] = {
     "country": "Россия",
     "countryIso3": "RUS",  # for payments/v1/methods
     "paymentMethodId": "",  # chosen card id (set via set_payment_method); else account default
+    "takeBags": False,  # include a courier bag? Lavka blocks checkout (bad_take_bags) until this choice is sent; set via set_take_bags
     "webCity": "213",  # Yandex region id (213 = Москва) → X-Lavka-Web-City header
     "locale": "ru-RU",  # → X-Lavka-Web-Locale header
 }

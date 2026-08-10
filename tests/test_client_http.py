@@ -460,6 +460,102 @@ async def test_cancel_order_posts_to_dynamic_path():
 
 
 @respx.mock
+async def test_checkout_preview_resolves_bad_take_bags():
+    # Cart is blocked only on the courier-bag choice; preview must send the
+    # choice (via set-cashback-flow) and return the now-orderable cart.
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "cartId": "c1", "cartVersion": 5, "cashbackFlow": "gain",
+                "nextIdempotencyToken": "tok-xyz",
+                "totalItemsPrice": "229", "totalPriceValue": "318",
+                "availableForCheckout": False, "checkoutUnavailableReason": "bad_take_bags",
+                "items": [{"id": "p1", "title": "Чебупели", "quantity": "1", "currentPrice": 229}],
+                "orderConditions": {"deliveryCost": "89"},
+            },
+        )
+    )
+    flow = respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/set-cashback-flow").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "cartId": "c1", "cartVersion": 6,
+                "totalItemsPrice": "229", "totalPriceValue": "318",
+                "availableForCheckout": True, "checkoutUnavailableReason": None,
+                "items": [{"id": "p1", "title": "Чебупели", "quantity": "1", "currentPrice": 229}],
+                "orderConditions": {"deliveryCost": "89"},
+            },
+        )
+    )
+    respx.post("https://lavka.yandex.ru/api/v1/providers/payments/v1/methods").mock(
+        return_value=httpx.Response(200, json={"methods": [{"id": "card-default", "type": "card", "displayName": ["MIR"], "availability": {"available": True}}], "defaultMethod": {"id": "card-default"}})
+    )
+    async with LavkaClient(_config()) as client:
+        summary = await client.checkout_preview()
+
+    assert summary["available_for_checkout"] is True
+    assert summary["checkout_blocked_reason"] is None
+    assert summary["cart_version"] == 6
+    body = json.loads(flow.calls.last.request.content)
+    assert body["takeBags"] is False  # configured default: no bag
+    assert body["cashbackFlow"] == "gain"  # echoed unchanged
+    assert body["idempotencyToken"] == "tok-xyz"
+    assert body["cartVersion"] == 5
+
+
+@respx.mock
+async def test_checkout_preview_leaves_non_bag_blockers_untouched():
+    # A different blocker must NOT trigger a set-cashback-flow write.
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "cartId": "c1", "cartVersion": 5,
+                "totalItemsPrice": "100", "totalPriceValue": "100",
+                "availableForCheckout": False, "checkoutUnavailableReason": "quantity-over-limit",
+                "items": [{"id": "p1", "title": "X", "quantity": "9", "currentPrice": 100}],
+            },
+        )
+    )
+    flow = respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/set-cashback-flow").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    respx.post("https://lavka.yandex.ru/api/v1/providers/payments/v1/methods").mock(
+        return_value=httpx.Response(200, json={"methods": [], "defaultMethod": {}})
+    )
+    async with LavkaClient(_config()) as client:
+        summary = await client.checkout_preview()
+    assert summary["available_for_checkout"] is False
+    assert summary["checkout_blocked_reason"] == "quantity-over-limit"
+    assert flow.call_count == 0  # bag write must not fire for other blockers
+
+
+@respx.mock
+async def test_set_take_bags_sends_choice_and_persists_default():
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        return_value=httpx.Response(
+            200,
+            json={"cartId": "c1", "cartVersion": 5, "cashbackFlow": "gain",
+                  "nextIdempotencyToken": "tok-1", "items": []},
+        )
+    )
+    flow = respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/set-cashback-flow").mock(
+        return_value=httpx.Response(200, json={"cartId": "c1", "cartVersion": 6, "items": []})
+    )
+    cfg = _config()
+    async with LavkaClient(cfg) as client:
+        await client.set_take_bags(True)
+    body = json.loads(flow.calls.last.request.content)
+    assert body["takeBags"] is True
+    # the choice is remembered so later auto-resolution uses it
+    assert cfg.context["takeBags"] is True
+
+
+@respx.mock
 async def test_auth_error_maps_to_lavka_auth_error():
     _mock_homepage()
     respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(

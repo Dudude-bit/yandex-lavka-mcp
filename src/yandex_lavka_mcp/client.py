@@ -526,9 +526,52 @@ class LavkaClient:
             return {"id": pick["id"], "type": pick.get("type") or "card", "label": pick.get("label"), "bank": pick.get("bank")}
         return {}
 
+    async def _send_bag_choice(self, take_bags: bool) -> dict[str, Any]:
+        """Persist the courier-bag choice on the cart and return the fresh raw cart.
+
+        Lavka refuses checkout (`availableForCheckout=false`, reason
+        `bad_take_bags`) until the customer has explicitly said whether they want
+        a bag. The web frontend sends that flag through the cashback-flow toggle
+        (`set-cashback-flow`), so we do the same — echoing the cart's current
+        `cashbackFlow` unchanged and only setting `takeBags`."""
+        cart = await self._get_cart_raw()
+        body = {
+            "additionalData": self._ctx("additionalData") or {},
+            "cartId": cart.get("cartId"),
+            "cartVersion": cart.get("cartVersion"),
+            "cashbackFlow": _pick(cart, "cashbackFlow", default="gain"),
+            "position": {"location": self._position().get("location") or []},
+            "takeBags": bool(take_bags),
+            "idempotencyToken": _pick(cart, "nextIdempotencyToken") or _new_idempotency_token(),
+            "depotType": self._ctx("depotType", "regular"),
+        }
+        raw = await self._call("set_cashback_flow", body)
+        data = raw.get("cart") if isinstance(raw, dict) and "cart" in raw else raw
+        return data if isinstance(data, dict) else {}
+
+    async def set_take_bags(self, take_bags: bool) -> dict[str, Any]:
+        """Explicitly choose whether the order includes a courier bag."""
+        self._config.context["takeBags"] = bool(take_bags)
+        return self._normalize_cart(await self._send_bag_choice(take_bags))
+
+    async def _ensure_bag_choice(self, cart: dict[str, Any]) -> dict[str, Any]:
+        """Clear a `bad_take_bags` block by sending the configured bag choice.
+
+        Idempotent: only fires when that specific block is present, so once the
+        choice is set the cart stays available and its version doesn't churn
+        (keeping the preview→confirm drift guard happy). Any other checkout
+        blocker (unavailable items, etc.) is left untouched."""
+        if (
+            cart.get("availableForCheckout") is False
+            and _pick(cart, "checkoutUnavailableReason") == "bad_take_bags"
+        ):
+            return await self._send_bag_choice(bool(self._ctx("takeBags", False)))
+        return cart
+
     async def checkout_preview(self) -> dict[str, Any]:
         """Order summary. Charges nothing — totals come straight from the cart."""
         cart = await self._get_cart_raw()
+        cart = await self._ensure_bag_choice(cart)
         summary = self._normalize_cart(cart)
         summary["address"] = self._ctx("additionalData") or None
         # Resolve the card that will actually be charged (cart.paymentMethod is
@@ -602,6 +645,10 @@ class LavkaClient:
         ``redirect_url`` to finish paying. Body shape captured live 2026-07-19.
         """
         cart = await self._get_cart_raw()
+        # Make the bag choice if that's the only thing blocking checkout. If the
+        # preview already did it this is a no-op; if it fires here it bumps the
+        # cart version and the drift guard below aborts (fail-closed, no charge).
+        cart = await self._ensure_bag_choice(cart)
         summary = self._normalize_cart(cart)
         live_version = cart.get("cartVersion")
         live_total = summary.get("total")
