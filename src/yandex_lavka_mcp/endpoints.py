@@ -36,6 +36,9 @@ DEFAULT_ENDPOINTS: dict[str, dict[str, str]] = {
     "geo_geocode": {"method": "POST", "path": "/api/v1/providers/geo/v1/geocode"},
     # Orders — CONFIRMED tracking
     "tracked_orders": {"method": "GET", "path": "/api/v1/providers/orders-tracking/v1/tracked-orders"},
+    # Order history — CONFIRMED (captured 2026-08-25 from live traffic)
+    "order_history": {"method": "GET", "path": "/api/v1/orders/v1/history/list"},
+    "order_detail": {"method": "GET", "path": "/api/v1/orders/v1/history/{orderId}"},
     # Place order — CONFIRMED (captured 2026-07-19 from a real "Оплатить"). NOT
     # under /providers/. Submit returns {data:{orderId}} and triggers a charge on
     # the on-file card; payment then progresses via payments/v1/status and may

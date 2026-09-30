@@ -568,6 +568,38 @@ async def active_orders() -> dict[str, Any]:
         return _err(exc)
 
 
+@mcp.tool()
+async def order_history(limit: int = 20, last_order_id: str | None = None) -> dict[str, Any]:
+    """Get list of past orders. Read-only.
+
+    Use last_order_id from the last result for pagination (pass it as last_order_id
+    to fetch the next page). Returns order id, status, total, items count, date.
+    """
+    try:
+        orders = await _with_client(
+            lambda c: c.order_history(limit=limit, last_order_id=last_order_id),
+            require_location=False,
+        )
+        return {"ok": True, "orders": orders}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def get_order(order_id: str) -> dict[str, Any]:
+    """Get full details of a specific order: items, totals, address, status, payment.
+
+    Pass an order_id from order_history or active_orders.
+    """
+    try:
+        order = await _with_client(
+            lambda c: c.get_order(order_id), require_location=False
+        )
+        return {"ok": True, "order": order}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
 
 

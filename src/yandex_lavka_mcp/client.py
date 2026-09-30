@@ -1009,6 +1009,118 @@ class LavkaClient:
                     "status": _pick(o, "status", "state"),
                     "eta_minutes": _pick(o, "eta", "etaMinutes"),
                     "title": _pick(o, "title", "statusTitle"),
+                    "total": _pick(o, "totalPriceValue", "total", "totalPrice"),
+                    "items_count": _pick(o, "itemsCount", "totalItemsCount"),
+                    "created_at": _pick(o, "createdAt", "created_at", "date"),
                 }
             )
         return trimmed
+
+    async def order_history(self, limit: int = 20, last_order_id: str | None = None) -> list[dict[str, Any]]:
+        """Fetch past orders from Lavka history."""
+        if self._client is None:
+            raise LavkaConfigError("Client used outside of an async context.")
+        await self._ensure_csrf()
+        params: dict[str, Any] = {"count": limit}
+        if last_order_id:
+            params["lastOrderId"] = last_order_id
+        resp = await self._client.get(
+            "/api/v1/orders/v1/history/list",
+            params=params,
+            headers=self._lavka_headers(),
+        )
+        if resp.status_code in (401, 403):
+            raise LavkaAuthError(
+                f"Lavka session is not authorized (HTTP {resp.status_code}). "
+                "Re-capture your Yandex cookies."
+            )
+        if resp.status_code >= 400:
+            raise LavkaApiError(
+                f"Lavka API error on order_history: HTTP {resp.status_code}",
+                status=resp.status_code,
+            )
+        data = resp.json()
+        orders = _dig(data, "data", "orders") or []
+        trimmed = []
+        for o in orders:
+            if not isinstance(o, dict):
+                continue
+            di = _dig(o, "deliveryInfo") or o
+            calc = _dig(o, "calculation") or {}
+            positions = _dig(o, "positions") or []
+            trimmed.append(
+                {
+                    "order_id": _pick(di, "orderId", "id"),
+                    "short_order_id": _pick(di, "shortOrderId"),
+                    "status": _pick(di, "status"),
+                    "is_canceled": bool(_pick(di, "isCanceled", default=False)),
+                    "is_failed": bool(_pick(di, "isFailed", default=False)),
+                    "date": _pick(di, "date"),
+                    "created_at": _pick(di, "createdAt"),
+                    "address": _pick(di, "address"),
+                    "items_count": len(positions),
+                    "total": _to_amount(_dig(calc, "finalCost")),
+                    "products_price": _to_amount(_dig(o, "productsPrice")),
+                    "delivery_cost": _to_amount(_dig(calc, "deliveryCost")),
+                    "discount": _to_amount(_dig(calc, "discount")),
+                }
+            )
+        return trimmed
+
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        """Fetch full details of a specific order."""
+        if self._client is None:
+            raise LavkaConfigError("Client used outside of an async context.")
+        await self._ensure_csrf()
+        safe_id = quote(str(order_id), safe="")
+        resp = await self._client.get(
+            f"/api/v1/orders/v1/history/{safe_id}",
+            headers=self._lavka_headers(),
+        )
+        if resp.status_code in (401, 403):
+            raise LavkaAuthError(
+                f"Lavka session is not authorized (HTTP {resp.status_code}). "
+                "Re-capture your Yandex cookies."
+            )
+        if resp.status_code >= 400:
+            raise LavkaApiError(
+                f"Lavka API error on get_order: HTTP {resp.status_code}",
+                status=resp.status_code,
+            )
+        raw = resp.json()
+        data = _dig(raw, "data") or raw
+        if not isinstance(data, dict):
+            data = {}
+        di = _dig(data, "deliveryInfo") or {}
+        calc = _dig(data, "calculation") or {}
+        positions = _dig(data, "positions") or []
+        items = [
+            {
+                "id": _pick(p, "id"),
+                "title": _pick(p, "title", "name", default=""),
+                "quantity": _pick(p, "count", "quantity", default=1),
+                "price": _to_amount(_pick(p, "price")),
+                "total": _to_amount(_pick(p, "totalPrice")),
+                "type": _pick(p, "type"),
+            }
+            for p in positions
+            if isinstance(p, dict)
+        ]
+        return {
+            "order_id": _pick(di, "orderId"),
+            "short_order_id": _pick(di, "shortOrderId"),
+            "status": _pick(di, "status"),
+            "is_canceled": bool(_pick(di, "isCanceled", default=False)),
+            "is_failed": bool(_pick(di, "isFailed", default=False)),
+            "date": _pick(di, "date"),
+            "created_at": _pick(di, "createdAt"),
+            "address": _pick(di, "address"),
+            "items": items,
+            "items_count": len(items),
+            "products_price": _to_amount(_dig(data, "productsPrice")),
+            "products_price_initial": _to_amount(_dig(data, "productsPriceInitial")),
+            "delivery_cost": _to_amount(_dig(calc, "deliveryCost")),
+            "discount": _to_amount(_dig(calc, "discount")),
+            "total": _to_amount(_dig(calc, "finalCost")),
+            "currency": _dig(calc, "currencyCode"),
+        }
