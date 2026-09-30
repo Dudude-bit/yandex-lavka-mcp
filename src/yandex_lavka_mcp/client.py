@@ -172,15 +172,30 @@ class LavkaClient:
             self._csrf_token = match.group(1)
 
     async def _call(
-        self, name: str, payload: dict[str, Any] | None = None, *, retry: bool = True
+        self,
+        name: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        retry: bool = True,
+        params: dict[str, Any] | None = None,
+        path_params: dict[str, Any] | None = None,
     ) -> Any:
         if self._client is None:
             raise LavkaConfigError("Client used outside of an async context.")
         spec = resolve_endpoint(name, self._config.endpoints)
         method = spec["method"].upper()
+        # Resolve path placeholders and query params once, before the retry
+        # loop, so retries reuse the same values.
+        path = spec["path"]
+        if path_params:
+            path = path.format(
+                **{k: quote(str(v), safe="") for k, v in path_params.items()}
+            )
         kwargs: dict[str, Any] = {}
         if payload is not None and method != "GET":
             kwargs["json"] = payload
+        if params is not None:
+            kwargs["params"] = params
 
         # Non-idempotent writes (placing an order) must NOT be retried: a lost
         # response on a retried request could submit the order twice.
@@ -190,7 +205,7 @@ class LavkaClient:
         for attempt in range(max_retries + 1):
             try:
                 resp = await self._client.request(
-                    method, spec["path"], headers=self._lavka_headers(), **kwargs
+                    method, path, headers=self._lavka_headers(), **kwargs
                 )
             except httpx.HTTPError as exc:
                 if attempt < max_retries:
@@ -1018,28 +1033,10 @@ class LavkaClient:
 
     async def order_history(self, limit: int = 20, last_order_id: str | None = None) -> list[dict[str, Any]]:
         """Fetch past orders from Lavka history."""
-        if self._client is None:
-            raise LavkaConfigError("Client used outside of an async context.")
-        await self._ensure_csrf()
         params: dict[str, Any] = {"count": limit}
         if last_order_id:
             params["lastOrderId"] = last_order_id
-        resp = await self._client.get(
-            "/api/v1/orders/v1/history/list",
-            params=params,
-            headers=self._lavka_headers(),
-        )
-        if resp.status_code in (401, 403):
-            raise LavkaAuthError(
-                f"Lavka session is not authorized (HTTP {resp.status_code}). "
-                "Re-capture your Yandex cookies."
-            )
-        if resp.status_code >= 400:
-            raise LavkaApiError(
-                f"Lavka API error on order_history: HTTP {resp.status_code}",
-                status=resp.status_code,
-            )
-        data = resp.json()
+        data = await self._call("order_history", params=params)
         orders = _dig(data, "data", "orders") or []
         trimmed = []
         for o in orders:
@@ -1069,25 +1066,7 @@ class LavkaClient:
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
         """Fetch full details of a specific order."""
-        if self._client is None:
-            raise LavkaConfigError("Client used outside of an async context.")
-        await self._ensure_csrf()
-        safe_id = quote(str(order_id), safe="")
-        resp = await self._client.get(
-            f"/api/v1/orders/v1/history/{safe_id}",
-            headers=self._lavka_headers(),
-        )
-        if resp.status_code in (401, 403):
-            raise LavkaAuthError(
-                f"Lavka session is not authorized (HTTP {resp.status_code}). "
-                "Re-capture your Yandex cookies."
-            )
-        if resp.status_code >= 400:
-            raise LavkaApiError(
-                f"Lavka API error on get_order: HTTP {resp.status_code}",
-                status=resp.status_code,
-            )
-        raw = resp.json()
+        raw = await self._call("order_detail", path_params={"orderId": order_id})
         data = _dig(raw, "data") or raw
         if not isinstance(data, dict):
             data = {}
