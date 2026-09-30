@@ -18,6 +18,12 @@ DEFAULT_ENDPOINTS: dict[str, dict[str, str]] = {
     # Catalog / search  — CONFIRMED
     "search": {"method": "POST", "path": "/api/v1/providers/search/v3/lavka"},
     "product": {"method": "POST", "path": "/api/v1/providers/v1/product"},
+    # Categories — CONFIRMED (captured 2026-08-25 from live traffic + verified
+    # live): layout returns the whole group→category menu for a storefront,
+    # category-group returns one group, category returns products+subcategories.
+    "category_tree": {"method": "POST", "path": "/api/v1/providers/v1/layout"},
+    "category_group": {"method": "POST", "path": "/api/v1/providers/v1/category-group"},
+    "category": {"method": "POST", "path": "/api/v1/providers/v2/category"},
     # Cart — CONFIRMED
     "cart_get": {"method": "POST", "path": "/api/v1/providers/cart/v1/retrieve"},
     "cart_update": {"method": "POST", "path": "/api/v1/providers/cart/v1/update"},

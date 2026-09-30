@@ -64,6 +64,16 @@ def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
+def _dig(data: Any, *keys: str) -> Any:
+    """Recursively dive into nested dicts by keys; returns None on any miss."""
+    cur = data
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
 def _to_amount(value: Any) -> float | None:
     """Normalize a Lavka price value (str/int/float/None) to a float."""
     if value is None:
@@ -120,8 +130,10 @@ class LavkaClient:
 
     def _base_body(self) -> dict[str, Any]:
         """Fields Lavka wants on nearly every call."""
+        depot_type = self._ctx("depotType", "regular")
         body: dict[str, Any] = {
-            "depotType": self._ctx("depotType", "regular"),
+            "depotType": depot_type,
+            "is_supermarket": depot_type == "supermarket",
             "currencySign": self._ctx("currencySign", "₽"),
         }
         pos = self._position()
@@ -228,6 +240,15 @@ class LavkaClient:
             "old_price": _to_amount(_pick(item, "oldPrice", "old_price")),
             "quantity_label": _pick(item, "amount", "quantity", "weight", default=""),
             "in_stock": _pick(item, "available", "in_stock", "inStock", default=True),
+        }
+
+    @staticmethod
+    def _trim_category(info: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": _pick(info, "id"),
+            "title": _pick(info, "title", default=""),
+            "slug": _pick(info, "deepLink"),
+            "available": bool(_pick(info, "available", default=True)),
         }
 
     @staticmethod
@@ -355,6 +376,203 @@ class LavkaClient:
         detail["description"] = _pick(product, "description", "longTitle", default="")
         detail["brand"] = _pick(product, "brand", default="")
         return detail
+
+    # -- categories ---------------------------------------------------------
+
+    async def get_category_tree(self, *, layout_slug: str = "grocery") -> dict[str, Any]:
+        """The full category menu of a storefront: groups with their categories.
+
+        ``layout_slug`` picks the storefront: "grocery" is the main food catalog;
+        hubs like "pharmacy" (Аптека) and "pet_store" (Зоотовары) have their own.
+        Group ids feed get_category_group; category ids feed get_category.
+        """
+        body = {**self._base_body(), "layoutSlug": layout_slug}
+        raw = await self._call("category_tree", body)
+        raw = raw if isinstance(raw, dict) else {}
+        groups = []
+        for section in raw.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            group_info = _dig(section, "categoryGroup", "categoryGroupInfo")
+            group_info = group_info if isinstance(group_info, dict) else {}
+            categories = [
+                self._trim_category(c["categoryInfo"])
+                for c in section.get("categories") or []
+                if isinstance(c, dict) and isinstance(c.get("categoryInfo"), dict)
+            ]
+            groups.append(
+                {
+                    "id": group_info.get("id"),
+                    "title": _pick(group_info, "title", default=""),
+                    "slug": group_info.get("deepLink"),
+                    "categories": categories,
+                }
+            )
+        return {
+            "layout_slug": layout_slug,
+            "groups": groups,
+            "group_count": len(groups),
+            "category_count": sum(len(g["categories"]) for g in groups),
+        }
+
+    async def _find_group_for_category(
+        self, category_id: str, *, layout_slug: str
+    ) -> tuple[str | None, str | None]:
+        """Locate which group contains ``category_id`` by walking the tree."""
+        tree = await self.get_category_tree(layout_slug=layout_slug)
+        titles: list[str] = []
+        for group in tree["groups"]:
+            titles.append(f"{group['title']} ({group['id']})")
+            for cat in group["categories"]:
+                if cat.get("id") == category_id or cat.get("slug") == category_id:
+                    return group["id"], group["title"]
+        raise LavkaApiError(
+            f"Category {category_id!r} not found in the {layout_slug!r} catalog. "
+            f"Known groups: {titles}"
+        )
+
+    async def get_category_group(
+        self, group_id: str, *, layout_slug: str = "grocery"
+    ) -> dict[str, Any]:
+        """The categories inside one catalog group, by its group id."""
+        body = {**self._base_body(), "layoutSlug": layout_slug, "groupId": group_id}
+        raw = await self._call("category_group", body)
+        raw = raw if isinstance(raw, dict) else {}
+        # The response's `products` array holds tile metadata: one entry typed
+        # "category_group" (the group itself) and its categories typed "category".
+        group: dict[str, Any] = {"id": group_id, "title": ""}
+        categories: list[dict[str, Any]] = []
+        for entry in raw.get("products") or []:
+            if not isinstance(entry, dict):
+                continue
+            etype = entry.get("type")
+            if etype == "category_group":
+                group = {"id": entry.get("id"), "title": _pick(entry, "title", default="")}
+            elif etype == "category":
+                categories.append(self._trim_category(entry))
+        return {"layout_slug": layout_slug, "group": group, "categories": categories}
+
+    async def get_category(
+        self,
+        category_id: str,
+        *,
+        group_id: str | None = None,
+        subcategory: str | None = None,
+        limit: int = 50,
+        layout_slug: str = "grocery",
+    ) -> dict[str, Any]:
+        """Products in a category + its subcategory tree.
+
+        Lavka serves whole categories here (not subcategories directly), so all
+        products of the category come back at once — pass ``subcategory`` (an id
+        or title from the result) to narrow them. Without ``group_id`` the parent
+        group is resolved via an extra tree lookup.
+        """
+        gid = group_id
+        group_title: str | None = None
+        if not gid:
+            gid, group_title = await self._find_group_for_category(
+                category_id, layout_slug=layout_slug
+            )
+            if not gid:
+                raise LavkaApiError(
+                    f"No parent group found for category {category_id!r}; pass "
+                    "group_id explicitly."
+                )
+        body = {
+            **self._base_body(),
+            "modes": ["grocery"],
+            "categoryId": category_id,
+            "categorySlugPath": {"layoutSlug": layout_slug, "groupId": gid},
+        }
+        raw = await self._call("category", body)
+        raw = raw if isinstance(raw, dict) else {}
+
+        cg = raw.get("categoryGroup") if isinstance(raw.get("categoryGroup"), dict) else {}
+        category_meta: dict[str, Any] = {}
+        subcategories: dict[str, dict[str, Any]] = {}
+        top_good_ids: list[str] = []
+
+        def walk(nodes: Any, current_sub: str | None) -> None:
+            for node in nodes if isinstance(nodes, list) else []:
+                if not isinstance(node, dict):
+                    continue
+                value = node.get("value") if isinstance(node.get("value"), dict) else {}
+                vtype = value.get("type")
+                vid = value.get("id")
+                if vtype == "category":
+                    if not category_meta:
+                        category_meta.update(self._trim_category(value))
+                    walk(node.get("items"), current_sub)
+                elif vtype == "subcategory":
+                    subcategories[vid] = {"id": vid, "title": _pick(value, "title", default=""), "product_ids": []}
+                    walk(node.get("items"), vid)
+                elif vtype == "good" and vid:
+                    top_good_ids.append(vid)
+                    if current_sub:
+                        subcategories[current_sub]["product_ids"].append(vid)
+
+        walk(raw.get("categories"), None)
+
+        products_raw = [p for p in raw.get("products") or [] if isinstance(p, dict)]
+        by_id = {_pick(p, "id"): p for p in products_raw}
+
+        chosen_ids: list[str] | None = None
+        if subcategory:
+            key = str(subcategory).strip().lower()
+            match = next(
+                (
+                    s
+                    for s in subcategories.values()
+                    if s["id"] == subcategory or s["title"].strip().lower() == key
+                ),
+                None,
+            ) or next(
+                (s for s in subcategories.values() if key in s["title"].strip().lower()),
+                None,
+            )
+            if not match:
+                names = [s["title"] for s in subcategories.values()]
+                raise LavkaApiError(
+                    f"Subcategory {subcategory!r} not found in this category. "
+                    f"Available: {names}"
+                )
+            chosen_ids = match["product_ids"]
+
+        if chosen_ids is None:
+            # The layout tree references only the first page of goods per node,
+            # so append anything the flat list has beyond it (keeps order).
+            tree_ids = list(dict.fromkeys(top_good_ids))
+            rest = [pid for pid in by_id if pid not in set(tree_ids)]
+            pool = tree_ids + rest
+        else:
+            pool = chosen_ids
+        seen: set[Any] = set()
+        ordered: list[dict[str, Any]] = []
+        total = 0
+        for pid in pool:
+            if pid in seen:
+                continue
+            seen.add(pid)
+            p = by_id.get(pid)
+            if p is None:
+                continue
+            total += 1
+            if len(ordered) < max(0, limit):
+                ordered.append(self._trim_product(p))
+
+        subs_out = [
+            {"id": s["id"], "title": s["title"], "product_count": len(s["product_ids"])}
+            for s in subcategories.values()
+        ]
+        return {
+            "layout_slug": layout_slug,
+            "category": category_meta or {"id": category_id},
+            "group": {"id": gid, "title": group_title or _pick(cg, "title", default="")},
+            "subcategories": subs_out,
+            "products": ordered,
+            "total_products": total,
+        }
 
     # -- cart --------------------------------------------------------------
 
