@@ -37,7 +37,9 @@ order — with an explicit human confirmation before any money is charged.
 | `update_cart_item` | — | Set exact quantity (0 removes). |
 | `clear_cart` | — | Empty the cart. |
 | `checkout_preview` | **no** | Full summary: items, subtotal, discount, delivery, ETA, payment, total. |
-| `confirm_order` | **YES** | Places the order and charges the on-file card. |
+| `list_payment_methods` | — | Your saved cards and which is the default. |
+| `set_payment_method` | — | Choose which card orders charge. |
+| `confirm_order` | **YES** | Places the order and charges the default card (or the one set above). |
 | `cancel_order` | — | Cancel an order by id. |
 | `active_orders` | — | Currently tracked orders with status/ETA. |
 
@@ -95,7 +97,8 @@ python scripts/extract_chrome_cookies.py          # auto-detects your profile
 python scripts/import_cookies.py --header "Session_id=...; yandexuid=...; L=..."
 ```
 
-Session cookies expire — re-run when calls start returning "session expired".
+Session cookies expire — re-run when calls start failing with "Lavka session is
+not authorized".
 
 ### 3. Set a delivery location
 
@@ -181,6 +184,8 @@ it with your own auth. Leaving OAuth unset is allowed for loopback/local use.
 
 > Session cookies expire; when calls start failing, re-capture them and update
 > the `YANDEX_LAVKA_MCP_CONFIG_JSON` secret. There is no headless Yandex login.
+> If the server needed a captcha pass (below), carry its `spravka` cookie over —
+> the local config doesn't have it.
 
 ## Captcha from a server
 
