@@ -249,8 +249,8 @@ async def set_delivery_address(
 async def search_products(query: str, limit: int = 20) -> dict[str, Any]:
     """Search the Lavka catalog at the current delivery location. Read-only.
 
-    Each result has an `id` (use it with add_to_cart) and a `slug` (use it with
-    get_product).
+    Each result has an `id` (use it with add_to_cart) and a `slug`; get_product
+    takes either.
     """
     try:
         results = await _with_client(lambda c: c.search(query, limit=limit))
@@ -260,14 +260,26 @@ async def search_products(query: str, limit: int = 20) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_product(slug: str) -> dict[str, Any]:
-    """Get details for one product: price, size, stock, description. Read-only.
+async def get_product(product: str) -> dict[str, Any]:
+    """Get one product: price, size, stock, description, nutrition. Read-only.
 
-    Pass the `slug` from a search result.
+    `product` is an `id` or `slug` from a search result, or a Lavka link (a
+    lavka.yandex.ru/good/... page or a shared ...?item=<id> link).
+
+    `nutrition` is the КБЖУ block exactly as the product card shows it, numbers
+    as Lavka gives them (nothing recomputed), or null when the card has none
+    (non-food items):
+    - `per_100g`: {kcal, protein, fat, carbs} per 100 g, or null.
+    - `per_portion`: the same per the card's other tab, with its `label`
+      ("Всё блюдо", "На упаковку", "На 50 г", ...), or null if the card has
+      only one tab.
+    - `default_basis`: the tab the card opens on ("per_100g" / "per_portion").
+    - `portion_grams`: the portion's weight when the card states it (from the
+      label, or the item's weight for a whole dish/pack), else null.
     """
     try:
-        product = await _with_client(lambda c: c.get_product(slug))
-        return {"ok": True, "product": product}
+        product_info = await _with_client(lambda c: c.get_product(product))
+        return {"ok": True, "product": product_info}
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

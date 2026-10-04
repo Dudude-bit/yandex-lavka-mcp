@@ -31,7 +31,7 @@ order — with an explicit human confirmation before any money is charged.
 | `set_delivery_address` | — | Set delivery to any address by text (any city). |
 | `set_location` | — | Set delivery point by raw lat/lon. |
 | `search_products` | — | Search the catalog at the current location. |
-| `get_product` | — | Product detail. |
+| `get_product` | — | Product detail by id, slug or Lavka link, incl. nutrition (КБЖУ per 100 g / per portion, as the card shows it). |
 | `view_cart` | — | Show cart + total. |
 | `add_to_cart` | — | Add an item. |
 | `update_cart_item` | — | Set exact quantity (0 removes). |

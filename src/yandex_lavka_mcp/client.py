@@ -7,8 +7,8 @@ a small trimmed dict — never the raw Lavka payload, which is large.
 Key facts baked in:
 - Location is ``[lon, lat]`` (note the order).
 - Search returns products under ``cacheProducts``; each product's ``id`` is the
-  hash used to add it to the cart, and ``deepLink`` is the slug used for the
-  product-detail call.
+  hash used to add it to the cart, and ``deepLink`` is its slug. The
+  product-detail call takes either.
 - Cart writes need the current ``cartId`` + ``cartVersion`` (read them from the
   cart first) plus a fresh ``idempotencyToken``.
 - Order totals live in the cart response (``totalItemsPrice`` /
@@ -21,7 +21,7 @@ import asyncio
 import re
 import uuid
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -76,6 +76,30 @@ def _to_amount(value: Any) -> float | None:
         return float(str(value).replace(" ", "").replace(" ", "").replace(",", "."))
     except (TypeError, ValueError):
         return None
+
+
+_PFC_FIELDS = {"calories": "kcal", "protein": "protein", "fat": "fat", "carbohydrate": "carbs"}
+_WEIGHT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(кг|г)\b", re.IGNORECASE)
+
+
+def _grams(text: Any) -> float | None:
+    """A weight written as "50 г" / "1,2 кг", in grams; None for anything else."""
+    m = _WEIGHT_RE.search(str(text or ""))
+    if not m:
+        return None
+    value = float(m.group(1).replace(",", "."))
+    return value * 1000 if m.group(2).lower() == "кг" else value
+
+
+def _product_ref(ref: str) -> str:
+    """A product id, slug or Lavka link -> what the product API takes (id or slug)."""
+    text = unquote(ref.strip())
+    # Share links: .../external?service=grocery&href=?item=<id>:st-md...
+    m = re.search(r"[?&]item=([0-9A-Za-z]+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"/good/([^/?#]+)", text)
+    return m.group(1) if m else text
 
 
 def _new_idempotency_token() -> str:
@@ -236,7 +260,8 @@ class LavkaClient:
             # get_product needs.
             "id": _pick(item, "id", "product_id"),
             "slug": _pick(item, "deepLink", "slug", "productId"),
-            "title": _pick(item, "title", "name", default="").replace("\xad", ""),  # soft hyphens
+            # Lavka marks up titles for the browser: soft hyphens, <notr>Из Лавки</notr>.
+            "title": re.sub(r"</?notr>", "", _pick(item, "title", "name", default="").replace("\xad", "")),
             "price": _to_amount(_pick(item, "currentPrice", "price", "pricePerItem")),
             "old_price": _to_amount(_pick(item, "oldPrice", "old_price")),
             "quantity_label": _pick(item, "amount", "quantity", "weight", default=""),
@@ -352,10 +377,47 @@ class LavkaClient:
         products = products if isinstance(products, list) else []
         return [self._trim_product(p) for p in products if isinstance(p, dict)][:limit]
 
-    async def get_product(self, slug: str) -> dict[str, Any]:
+    @staticmethod
+    def _nutrition(product: dict[str, Any]) -> dict[str, Any] | None:
+        """КБЖУ as the product card shows it: numbers passed through, never recomputed.
+
+        Mirrors the web card: the portion tab exists only when some value has a
+        portion figure, tabs follow pfcSettings.orderPfcBlocks, the first is selected.
+        """
+        pfc = (product.get("options") or {}).get("ingredients") or {}
+        traits = [t for t in pfc.get("pfcTraits") or [] if isinstance(t, dict) and t.get("id") in _PFC_FIELDS]
+        settings = pfc.get("pfcSettings") or {}
+
+        def block(measure: str) -> dict[str, Any] | None:
+            values: dict[str, Any] = dict.fromkeys(_PFC_FIELDS.values())
+            for t in traits:
+                values[_PFC_FIELDS[t["id"]]] = _to_amount((t.get("measures") or {}).get(measure))
+            return values if any(v is not None for v in values.values()) else None
+
+        tabs = {"per100g": block("per100g"), "per_portion": block("perPortion")}
+        if not any(tabs.values()):
+            return None  # not food, or no data on the card
+        portion_grams = None
+        if tabs["per_portion"]:
+            label = settings.get("perPortionTitle")
+            tabs["per_portion"]["label"] = label
+            # "На 50 г" names its weight; "Всё блюдо" / "На упаковку" is the whole item.
+            portion_grams = _grams(label)
+            if portion_grams is None and re.search(r"упаковк|блюдо", str(label or ""), re.IGNORECASE):
+                portion_grams = _grams(product.get("amount"))
+        order = [b for b in settings.get("orderPfcBlocks") or [] if b in tabs] + ["per100g", "per_portion"]
+        default = next(b for b in order if tabs[b])
+        return {
+            "per_100g": tabs["per100g"],
+            "per_portion": tabs["per_portion"],
+            "default_basis": "per_100g" if default == "per100g" else "per_portion",
+            "portion_grams": portion_grams,
+        }
+
+    async def get_product(self, ref: str) -> dict[str, Any]:
         body = {
             **self._base_body(),
-            "productId": slug,
+            "productId": _product_ref(ref),
             "needCatalogPaths": True,
             "isEcomboReward": False,
             "rewardPriceTemplate": "",
@@ -367,6 +429,7 @@ class LavkaClient:
         detail = self._trim_product(product)
         detail["description"] = _pick(product, "description", "longTitle", default="")
         detail["brand"] = _pick(product, "brand", default="")
+        detail["nutrition"] = self._nutrition(product)
         return detail
 
     # -- cart --------------------------------------------------------------
