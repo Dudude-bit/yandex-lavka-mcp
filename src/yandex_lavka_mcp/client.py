@@ -385,7 +385,8 @@ class LavkaClient:
         The portion tab exists only when some value has a portion figure (as on
         the web card). Lavka sends no "selected tab" flag: its website opens the
         first of pfcSettings.orderPfcBlocks and the app often opens the other one,
-        so with two tabs the default is unknown (None).
+        so with two tabs the default is unknown (None). `warning` flags a portion
+        that doesn't follow from per_100g; the numbers themselves stay as sent.
         """
         pfc = (product.get("options") or {}).get("ingredients") or {}
         traits = [t for t in pfc.get("pfcTraits") or [] if isinstance(t, dict) and t.get("id") in _PFC_FIELDS]
@@ -410,11 +411,29 @@ class LavkaClient:
                 portion_grams = _grams(product.get("amount"))
         present = [b for b in tabs if tabs[b]]
         default = None if len(present) > 1 else ("per_100g" if present[0] == "per100g" else "per_portion")
+        warning = None
+        per_100g, per_portion = tabs["per100g"], tabs["per_portion"]
+        if per_100g and per_portion and portion_grams:
+            # Lavka's portion is per_100g × grams / 100 truncated to 0.1; allow that
+            # plus per_100g's own rounding. Seen beyond it: 30 g values under "На 300 г".
+            tolerance = 0.1 + 0.05 * portion_grams / 100 + 1e-9
+            if any(
+                abs(per_100g[k] * portion_grams / 100 - per_portion[k]) > tolerance
+                for k in _PFC_FIELDS.values()
+                if per_100g[k] is not None and per_portion[k] is not None
+            ):
+                warning = (
+                    f"Lavka's data disagrees with itself: per_portion ({per_portion['label']}) is not "
+                    f"per_100g scaled to {portion_grams:g} g, so one of them is wrong in Lavka's "
+                    "catalog (its card shows the same). Don't log per_portion as is: ask the user, "
+                    "or use per_100g with the weight actually eaten."
+                )
         return {
-            "per_100g": tabs["per100g"],
-            "per_portion": tabs["per_portion"],
+            "per_100g": per_100g,
+            "per_portion": per_portion,
             "default_basis": default,
             "portion_grams": portion_grams,
+            "warning": warning,
         }
 
     async def get_product(self, ref: str) -> dict[str, Any]:

@@ -157,6 +157,7 @@ def test_nutrition_both_tabs():
         # No "selected tab" flag in the data; the site and the app disagree on which opens.
         "default_basis": None,
         "portion_grams": 140.0,
+        "warning": None,
     }
     e = LavkaClient._nutrition(EXPONENTA)
     assert e["per_portion"] == {"kcal": 99.2, "protein": 20.0, "fat": 0.0, "carbs": 4.8, "label": "На упаковку"}
@@ -182,6 +183,7 @@ def test_nutrition_single_tab_when_no_portion_values():
         "per_portion": None,
         "default_basis": "per_100g",
         "portion_grams": None,
+        "warning": None,
     }
 
 
@@ -222,3 +224,28 @@ def test_product_ref_accepts_id_slug_and_links(ref, expected):
 def test_titles_drop_notr_markup():
     assert LavkaClient._trim_product({"title": "Огурцы <notr>Из Лавки</notr>"})["title"] == "Огурцы Из Лавки"
     assert LavkaClient._trim_product({"title": "Сыр Бри &laquo;Лавка\xa0100&raquo;"})["title"] == "Сыр Бри «Лавка\xa0100»"
+
+
+# Live data, 2026-10-04: Lavka's portion = per_100g × grams / 100, truncated to 0.1.
+TOMATO = _pfc(["per100g", "per_portion"], "На 600 г", [("20", "120"), ("0,6", "3,6"), ("0,2", "1,2"), ("4,2", "25,2")], "600 г")
+SHOCK_MILK = _pfc(["per100g", "per_portion"], "На 150 г", [("75", "112,5"), ("10,1", "15,1"), ("1,4", "2"), ("5,5", "8,2")], "150 г")
+TOBLERONE = _pfc(["per100g", "per_portion"], "На 35 г", [("528", "184,8"), ("5,6", "1,9"), ("28", "9,8"), ("61", "21,3")], "35 г")
+BREAKFAST = _pfc(["per_portion", "per100g"], "Всё блюдо", [("248,45", "645,9"), ("7,88", "20,4"), ("15,45", "40,1"), ("19,48", "50,6")], "260 г")
+
+
+@pytest.mark.parametrize("product", [CHICKEN, EXPONENTA, BOMBBAR, TOMATO, SHOCK_MILK, TOBLERONE, BREAKFAST])
+def test_nutrition_consistent_portion_has_no_warning(product):
+    assert LavkaClient._nutrition(product)["warning"] is None
+
+
+def test_nutrition_warns_when_portion_disagrees_with_per_100g():
+    # Cucumbers: the "На 300 г" values are Lavka's figures for 30 g. Numbers stay
+    # untouched; the model is told not to trust the pair blindly.
+    n = LavkaClient._nutrition(CUCUMBER)
+    assert n["per_portion"]["kcal"] == 4.5
+    assert "per_100g" in n["warning"] and "300" in n["warning"]
+
+
+def test_nutrition_no_check_without_a_known_portion_weight():
+    n = LavkaClient._nutrition(_pfc(["per_portion"], "На порцию", [("100", "1")] * 4, "200 г"))
+    assert (n["portion_grams"], n["warning"]) == (None, None)

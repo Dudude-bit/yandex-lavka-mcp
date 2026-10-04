@@ -277,6 +277,8 @@ async def get_product(product: str) -> dict[str, Any]:
       has one; null when it has both (Lavka doesn't say which one opens).
     - `portion_grams`: the portion's weight when the card states it (from the
       label, or the item's weight for a whole dish/pack), else null.
+    - `warning`: null, or a note that per_portion doesn't follow from per_100g
+      for that weight — Lavka's own data is wrong then; don't log it blindly.
     """
     try:
         product_info = await _with_client(lambda c: c.get_product(product))
