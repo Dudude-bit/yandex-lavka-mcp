@@ -156,6 +156,7 @@ docker run -p 8000:8000 \
 | `YANDEX_LAVKA_MCP_TRANSPORT` | `stdio` (default) or `streamable-http`. |
 | `YANDEX_LAVKA_MCP_HOST` / `_PORT` | Bind address for HTTP (default `0.0.0.0:8000` in Docker). |
 | `YANDEX_LAVKA_MCP_CONFIG_JSON` | The whole `config.json` as one secret (instead of a file). |
+| `YANDEX_LAVKA_MCP_SPRAVKA` | Captcha pass for the server's IP, if Yandex demands one (see [Captcha](#captcha-from-a-server)). |
 
 ### Authentication (any OIDC provider)
 
@@ -184,8 +185,7 @@ it with your own auth. Leaving OAuth unset is allowed for loopback/local use.
 
 > Session cookies expire; when calls start failing, re-capture them and update
 > the `YANDEX_LAVKA_MCP_CONFIG_JSON` secret. There is no headless Yandex login.
-> If the server needed a captcha pass (below), carry its `spravka` cookie over —
-> the local config doesn't have it.
+> The captcha pass (below) is a separate secret, so it survives this.
 
 ## Captcha from a server
 
@@ -199,8 +199,9 @@ uv run --with playwright python scripts/solve_captcha.py --proxy socks5://127.0.
 ```
 
 A throwaway Chrome window opens on the captcha; solve it. The script prints the
-`spravka` cookie — add it to the server config's `cookies` and restart. It lasts
-about 30 days.
+`spravka` cookie to stdout — set it as the `YANDEX_LAVKA_MCP_SPRAVKA` secret
+(pipe it straight in) and restart. It lasts about 30 days; repeat when the
+captcha error comes back.
 
 ## Develop
 

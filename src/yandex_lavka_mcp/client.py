@@ -222,7 +222,8 @@ class LavkaClient:
                     f"Yandex anti-bot returned a captcha instead of data on {name}: "
                     "Lavka is refusing requests from this server's IP address (cookies are "
                     "fine; retrying won't help). Fix: solve the captcha once through this IP "
-                    "with scripts/solve_captcha.py and add the `spravka` cookie to the config."
+                    "with scripts/solve_captcha.py and set the `spravka` it prints as "
+                    "YANDEX_LAVKA_MCP_SPRAVKA."
                 )
             return data
 

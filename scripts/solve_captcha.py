@@ -3,8 +3,8 @@
 
 When Lavka answers a server with a captcha (the MCP says "Yandex anti-bot
 returned a captcha"), it is the server's IP that is flagged, not the session.
-Solve the captcha once *through that IP* and add the `spravka` cookie to the
-server's config — requests from there pass again (the cookie lives ~30 days).
+Solve the captcha once *through that IP* and give the server the resulting
+`spravka` cookie — requests from there pass again (the cookie lives ~30 days).
 
 Usage:
     ssh -f -N -D 1080 <your-server>        # SOCKS proxy through the server's IP
@@ -13,8 +13,7 @@ Usage:
 A Chrome window opens on the captcha (a throwaway profile, not your browser);
 solve it there. The script waits until Lavka really answers with data, then
 prints the `spravka` value to stdout (everything else goes to stderr), so it
-can be piped into wherever the server's config lives. Add it to the config's
-"cookies" as "spravka".
+can be piped straight into the server's YANDEX_LAVKA_MCP_SPRAVKA secret.
 """
 
 from __future__ import annotations

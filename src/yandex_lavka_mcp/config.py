@@ -121,14 +121,20 @@ def load_config() -> Config:
     # In a container, inject the whole config as one env var (a Dokploy/K8s
     # secret) instead of a file on disk.
     inline = os.environ.get("YANDEX_LAVKA_MCP_CONFIG_JSON")
-    if inline:
-        return _config_from_dict(json.loads(inline))
     path = config_path()
-    if not path.exists():
-        return Config()
-    with path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
-    return _config_from_dict(data)
+    if inline:
+        config = _config_from_dict(json.loads(inline))
+    elif path.exists():
+        with path.open("r", encoding="utf-8") as fh:
+            config = _config_from_dict(json.load(fh))
+    else:
+        config = Config()
+    # A server's captcha pass (see scripts/solve_captcha.py) is renewed on its own
+    # schedule, apart from the session cookies, so a cookie refresh can't drop it.
+    spravka = os.environ.get("YANDEX_LAVKA_MCP_SPRAVKA", "").strip()
+    if spravka:
+        config.cookies["spravka"] = spravka
+    return config
 
 
 def save_config(config: Config) -> Path:
