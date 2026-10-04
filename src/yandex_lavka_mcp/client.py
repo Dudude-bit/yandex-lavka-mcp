@@ -256,8 +256,8 @@ class LavkaClient:
     @staticmethod
     def _trim_product(item: dict[str, Any]) -> dict[str, Any]:
         return {
-            # `id` (a hash) is what add_to_cart needs; `slug` (deepLink) is what
-            # get_product needs.
+            # `id` (a hash) is what add_to_cart needs; get_product takes it or the
+            # `slug` (deepLink, the product page's path).
             "id": _pick(item, "id", "product_id"),
             "slug": _pick(item, "deepLink", "slug", "productId"),
             # Lavka marks up titles for the browser: soft hyphens, <notr>Из Лавки</notr>.
