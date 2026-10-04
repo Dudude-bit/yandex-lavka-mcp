@@ -17,6 +17,7 @@ Configuration (env vars):
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -69,24 +70,23 @@ class JwksTokenVerifier(TokenVerifier):
         self.allowed_subjects = allowed_subjects or []
         self._jwks_url = jwks_url
         self._jwk_client = None
-        if jwks_url:
-            self._jwks()
 
-    def _jwks(self):
-        # Discovered on first use and retried until it succeeds, so a server that
-        # starts before its auth provider recovers on its own.
+    def _signing_key(self, token: str):
+        # The JWKS URL is discovered on first use and retried until it succeeds,
+        # so a server that starts before its auth provider recovers on its own.
         if self._jwk_client is None:
             # Imported lazily so the base (stdio) install needs no JWT deps.
             from jwt import PyJWKClient
 
             self._jwk_client = PyJWKClient(self._jwks_url or _discover_jwks_url(self.issuer))
-        return self._jwk_client
+        return self._jwk_client.get_signing_key_from_jwt(token)
 
     async def verify_token(self, token: str) -> AccessToken | None:
         import jwt
 
         try:
-            signing_key = self._jwks().get_signing_key_from_jwt(token)
+            # Blocking HTTP (discovery, key fetch) — keep it off the event loop.
+            signing_key = await asyncio.to_thread(self._signing_key, token)
             claims = jwt.decode(
                 token,
                 signing_key.key,

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import time
 
+import httpx
 import jwt
 import pytest
+import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from yandex_lavka_mcp.auth import JwksTokenVerifier, build_token_verifier
@@ -32,8 +34,12 @@ def _verifier(public_key, *, audience=None, required_scopes=None, allowed_subjec
     class _Key:
         key = public_key
 
+    class _Jwks:
+        def get_signing_key_from_jwt(self, token):
+            return _Key()
+
     # Avoid any network: hand back our public key for every token.
-    v._jwk_client.get_signing_key_from_jwt = lambda token: _Key()
+    v._jwk_client = _Jwks()
     return v
 
 
@@ -93,3 +99,20 @@ async def test_subject_allowlist(keypair):
     v = _verifier(public, allowed_subjects=["allowed-sub"])
     assert await v.verify_token(_token(private, sub="allowed-sub")) is not None
     assert await v.verify_token(_token(private, sub="someone-else")) is None
+
+
+@respx.mock
+async def test_jwks_discovery_retried_after_provider_was_down():
+    # The server booted before its auth provider: discovery failed, and a guessed
+    # JWKS URL used to be cached for good, rejecting every token afterwards.
+    discovery = ISSUER + "/.well-known/openid-configuration"
+    keys = "http://127.0.0.1:9/keys"  # refuses fast, no real network
+    v = JwksTokenVerifier(issuer=ISSUER, jwks_url=None, resource_url=None, audience=None, required_scopes=[])
+
+    respx.get(discovery).mock(return_value=httpx.Response(502))
+    assert await v.verify_token("a.b.c") is None
+    assert v._jwk_client is None  # nothing guessed and kept
+
+    respx.get(discovery).mock(return_value=httpx.Response(200, json={"jwks_uri": keys}))
+    assert await v.verify_token("a.b.c") is None
+    assert v._jwk_client.uri == keys
