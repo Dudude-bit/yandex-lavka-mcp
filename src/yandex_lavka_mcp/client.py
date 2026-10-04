@@ -18,6 +18,7 @@ Key facts baked in:
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 import uuid
 from typing import Any
@@ -260,8 +261,8 @@ class LavkaClient:
             # `slug` (deepLink, the product page's path).
             "id": _pick(item, "id", "product_id"),
             "slug": _pick(item, "deepLink", "slug", "productId"),
-            # Lavka marks up titles for the browser: soft hyphens, <notr>Из Лавки</notr>.
-            "title": re.sub(r"</?notr>", "", _pick(item, "title", "name", default="").replace("\xad", "")),
+            # Lavka marks up titles for the browser: soft hyphens, <notr>…</notr>, &laquo;.
+            "title": html.unescape(re.sub(r"</?notr>", "", _pick(item, "title", "name", default="").replace("\xad", ""))),
             "price": _to_amount(_pick(item, "currentPrice", "price", "pricePerItem")),
             "old_price": _to_amount(_pick(item, "oldPrice", "old_price")),
             "quantity_label": _pick(item, "amount", "quantity", "weight", default=""),
@@ -381,8 +382,10 @@ class LavkaClient:
     def _nutrition(product: dict[str, Any]) -> dict[str, Any] | None:
         """КБЖУ as the product card shows it: numbers passed through, never recomputed.
 
-        Mirrors the web card: the portion tab exists only when some value has a
-        portion figure, tabs follow pfcSettings.orderPfcBlocks, the first is selected.
+        The portion tab exists only when some value has a portion figure (as on
+        the web card). Lavka sends no "selected tab" flag: its website opens the
+        first of pfcSettings.orderPfcBlocks and the app often opens the other one,
+        so with two tabs the default is unknown (None).
         """
         pfc = (product.get("options") or {}).get("ingredients") or {}
         traits = [t for t in pfc.get("pfcTraits") or [] if isinstance(t, dict) and t.get("id") in _PFC_FIELDS]
@@ -405,12 +408,12 @@ class LavkaClient:
             portion_grams = _grams(label)
             if portion_grams is None and re.search(r"упаковк|блюдо", str(label or ""), re.IGNORECASE):
                 portion_grams = _grams(product.get("amount"))
-        order = [b for b in settings.get("orderPfcBlocks") or [] if b in tabs] + ["per100g", "per_portion"]
-        default = next(b for b in order if tabs[b])
+        present = [b for b in tabs if tabs[b]]
+        default = None if len(present) > 1 else ("per_100g" if present[0] == "per100g" else "per_portion")
         return {
             "per_100g": tabs["per100g"],
             "per_portion": tabs["per_portion"],
-            "default_basis": "per_100g" if default == "per100g" else "per_portion",
+            "default_basis": default,
             "portion_grams": portion_grams,
         }
 

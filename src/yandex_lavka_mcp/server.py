@@ -273,7 +273,8 @@ async def get_product(product: str) -> dict[str, Any]:
     - `per_portion`: the same per the card's other tab, with its `label`
       ("Всё блюдо", "На упаковку", "На 50 г", ...), or null if the card has
       only one tab.
-    - `default_basis`: the tab the card opens on ("per_100g" / "per_portion").
+    - `default_basis`: the only tab ("per_100g" / "per_portion") when the card
+      has one; null when it has both (Lavka doesn't say which one opens).
     - `portion_grams`: the portion's weight when the card states it (from the
       label, or the item's weight for a whole dish/pack), else null.
     """

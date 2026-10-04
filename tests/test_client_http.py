@@ -522,4 +522,4 @@ async def test_get_product_by_share_link_returns_nutrition():
     assert json.loads(route.calls.last.request.content)["productId"] == "c236b75cff42468388777bdbdf523d0f000200020000"
     assert product["title"] == "Огурцы хрустящие Из Лавки"
     assert product["nutrition"]["per_100g"] == {"kcal": 15.0, "protein": 0.8, "fat": 0.1, "carbs": 2.8}
-    assert product["nutrition"]["default_basis"] == "per_100g"
+    assert product["nutrition"]["default_basis"] is None  # two tabs, no flag

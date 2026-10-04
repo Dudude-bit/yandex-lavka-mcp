@@ -149,28 +149,30 @@ BOMBBAR = _pfc(["per100g", "per_portion"], "На 50 г", [("369", "184,5"), ("25
                extras={"extrasName": "соуса", "pfcOptionsExtras": []})
 
 
-def test_nutrition_both_tabs_first_in_order_is_default():
+def test_nutrition_both_tabs():
     n = LavkaClient._nutrition(CHICKEN)
     assert n == {
         "per_100g": {"kcal": 168.1, "protein": 30.7, "fat": 4.7, "carbs": 0.7},
         "per_portion": {"kcal": 235.3, "protein": 42.9, "fat": 6.5, "carbs": 0.9, "label": "Всё блюдо"},
-        "default_basis": "per_portion",
+        # No "selected tab" flag in the data; the site and the app disagree on which opens.
+        "default_basis": None,
         "portion_grams": 140.0,
     }
     e = LavkaClient._nutrition(EXPONENTA)
     assert e["per_portion"] == {"kcal": 99.2, "protein": 20.0, "fat": 0.0, "carbs": 4.8, "label": "На упаковку"}
-    assert (e["default_basis"], e["portion_grams"]) == ("per_portion", 160.0)
+    assert (e["default_basis"], e["portion_grams"]) == (None, 160.0)
 
 
-def test_nutrition_per100g_first_and_grams_from_label():
+def test_nutrition_grams_from_label_and_values_passed_through():
     c = LavkaClient._nutrition(CUCUMBER)
     assert c["per_100g"] == {"kcal": 15.0, "protein": 0.8, "fat": 0.1, "carbs": 2.8}
-    # Passed through as Lavka shows it, even when it looks off (4,5 kcal for 300 g).
+    # Passed through as Lavka sends it, even when it is off: these are the values
+    # for 30 g under a "На 300 г" label (Lavka's data, shown so on its website too).
     assert c["per_portion"] == {"kcal": 4.5, "protein": 0.2, "fat": 0.0, "carbs": 0.8, "label": "На 300 г"}
-    assert (c["default_basis"], c["portion_grams"]) == ("per_100g", 300.0)
+    assert (c["default_basis"], c["portion_grams"]) == (None, 300.0)
     b = LavkaClient._nutrition(BOMBBAR)
     assert b["per_portion"] == {"kcal": 184.5, "protein": 12.5, "fat": 2.0, "carbs": 27.5, "label": "На 50 г"}
-    assert (b["default_basis"], b["portion_grams"]) == ("per_100g", 50.0)
+    assert (b["default_basis"], b["portion_grams"]) == (None, 50.0)
 
 
 def test_nutrition_single_tab_when_no_portion_values():
@@ -181,6 +183,11 @@ def test_nutrition_single_tab_when_no_portion_values():
         "default_basis": "per_100g",
         "portion_grams": None,
     }
+
+
+def test_nutrition_single_portion_tab_is_the_default():
+    n = LavkaClient._nutrition(_pfc(["per_portion", "per100g"], "Всё блюдо", [("", "300")] * 4, "250 г"))
+    assert (n["per_100g"], n["default_basis"]) == (None, "per_portion")
 
 
 def test_nutrition_portion_grams_never_guessed():
@@ -214,3 +221,4 @@ def test_product_ref_accepts_id_slug_and_links(ref, expected):
 
 def test_titles_drop_notr_markup():
     assert LavkaClient._trim_product({"title": "Огурцы <notr>Из Лавки</notr>"})["title"] == "Огурцы Из Лавки"
+    assert LavkaClient._trim_product({"title": "Сыр Бри &laquo;Лавка\xa0100&raquo;"})["title"] == "Сыр Бри «Лавка\xa0100»"
