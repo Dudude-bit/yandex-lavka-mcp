@@ -120,3 +120,9 @@ def test_normalize_cart_real_breakdown_from_explicit_fields():
     assert cart["delivery_fee"] == 119.0  # real cost, not inferred
     assert cart["total"] == 1423.0
     assert cart["eta"] == "5–10 мин"
+
+
+def test_titles_drop_soft_hyphens():
+    # Lavka hyphenates titles for the browser ("Моло\xadко"); the model needs plain text.
+    assert LavkaClient._trim_product({"title": "Моло\xadко 2,5%"})["title"] == "Молоко 2,5%"
+    assert LavkaClient._trim_cart_item({"title": "Моло\xadко"})["title"] == "Молоко"

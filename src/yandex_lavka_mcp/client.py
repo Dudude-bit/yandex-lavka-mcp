@@ -220,8 +220,9 @@ class LavkaClient:
             if isinstance(data, dict) and data.get("type") == "captcha":
                 raise LavkaApiError(
                     f"Yandex anti-bot returned a captcha instead of data on {name}: "
-                    "Lavka is refusing requests from this server's IP address. "
-                    "Cookies are fine; retrying from here won't help."
+                    "Lavka is refusing requests from this server's IP address (cookies are "
+                    "fine; retrying won't help). Fix: solve the captcha once through this IP "
+                    "with scripts/solve_captcha.py and add the `spravka` cookie to the config."
                 )
             return data
 
@@ -234,7 +235,7 @@ class LavkaClient:
             # get_product needs.
             "id": _pick(item, "id", "product_id"),
             "slug": _pick(item, "deepLink", "slug", "productId"),
-            "title": _pick(item, "title", "name", default=""),
+            "title": _pick(item, "title", "name", default="").replace("\xad", ""),  # soft hyphens
             "price": _to_amount(_pick(item, "currentPrice", "price", "pricePerItem")),
             "old_price": _to_amount(_pick(item, "oldPrice", "old_price")),
             "quantity_label": _pick(item, "amount", "quantity", "weight", default=""),
@@ -245,7 +246,7 @@ class LavkaClient:
     def _trim_cart_item(item: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": _pick(item, "id", "product_id"),
-            "title": _pick(item, "title", "name", default=""),
+            "title": _pick(item, "title", "name", default="").replace("\xad", ""),  # soft hyphens
             "quantity": _pick(item, "quantity", "count", "qty", default=1),
             "price": _to_amount(_pick(item, "currentPrice", "price")),
             "quantity_label": _pick(item, "amount", "weight", default=""),
@@ -502,7 +503,8 @@ class LavkaClient:
         default_id = default.get("id")
         out = []
         for m in raw.get("methods") or []:
-            if not isinstance(m, dict):
+            # Lavka also lists every SBP bank (`sbp_bind_token`); checkout pays by card only.
+            if not isinstance(m, dict) or m.get("type") != "card":
                 continue
             out.append(
                 {

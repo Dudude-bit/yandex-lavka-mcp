@@ -383,6 +383,8 @@ async def test_list_payment_methods_trims_and_flags_default():
                 "methods": [
                     {"id": "card-1", "type": "card", "displayName": ["MIR", "1384"], "cardBank": "TINKOFF", "availability": {"available": True}},
                     {"id": "card-2", "type": "card", "displayName": ["MIR", "7482"], "cardBank": "VTB", "availability": {"available": True}},
+                    # Lavka also lists every SBP bank (225 live); checkout only pays by card.
+                    {"id": "sbp-1", "type": "sbp_bind_token", "name": "Сбербанк", "availability": {"available": True}},
                 ],
                 "defaultMethod": {"id": "card-1"},
             },
@@ -394,6 +396,7 @@ async def test_list_payment_methods_trims_and_flags_default():
     assert info["methods"][0]["label"] == "MIR 1384"
     assert info["methods"][0]["is_default"] is True
     assert info["methods"][1]["is_default"] is False
+    assert [m["id"] for m in info["methods"]] == ["card-1", "card-2"]
 
 
 @respx.mock
