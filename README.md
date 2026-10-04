@@ -182,6 +182,21 @@ it with your own auth. Leaving OAuth unset is allowed for loopback/local use.
 > Session cookies expire; when calls start failing, re-capture them and update
 > the `YANDEX_LAVKA_MCP_CONFIG_JSON` secret. There is no headless Yandex login.
 
+## Captcha from a server
+
+Yandex may start answering a hosted instance with a captcha — decided by the
+server's IP, not the session (the same cookies keep working from home). Tools then
+fail with *"Yandex anti-bot returned a captcha"*. Solve it once through that IP:
+
+```bash
+ssh -f -N -D 1080 <your-server>     # SOCKS proxy out of the server's IP
+uv run --with playwright python scripts/solve_captcha.py --proxy socks5://127.0.0.1:1080
+```
+
+A throwaway Chrome window opens on the captcha; solve it. The script prints the
+`spravka` cookie — add it to the server config's `cookies` and restart. It lasts
+about 30 days.
+
 ## Develop
 
 ```bash
