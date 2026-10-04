@@ -175,21 +175,24 @@ class LavkaClient:
         max_retries = _MAX_RETRIES if retry else 0
         await self._ensure_csrf()
         csrf_refreshed = False
-        for attempt in range(max_retries + 1):
+        attempt = 0
+        while True:
             try:
                 resp = await self._client.request(
                     method, spec["path"], headers=self._lavka_headers(), **kwargs
                 )
             except httpx.HTTPError as exc:
                 if attempt < max_retries:
-                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    attempt += 1
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
                     continue
                 raise LavkaApiError(f"Network error calling {name}: {exc}") from exc
 
             if resp.status_code in (401, 403):
                 # A stale CSRF token also shows up as 401 — refresh once and retry
-                # before concluding the session itself is dead. (Safe even for
-                # non-retry calls: the request never reached a success.)
+                # before concluding the session itself is dead. Doesn't use up a
+                # retry, and is safe even for non-retry calls: the request was
+                # rejected, so it never took effect.
                 if not csrf_refreshed:
                     csrf_refreshed = True
                     await self._ensure_csrf(force=True)
@@ -199,7 +202,8 @@ class LavkaClient:
                     "Re-capture your Yandex cookies."
                 )
             if resp.status_code >= 500 and attempt < max_retries:
-                await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                attempt += 1
+                await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
                 continue
             if resp.status_code >= 400:
                 # Keep the upstream body server-side; don't echo it to the caller.
@@ -208,11 +212,18 @@ class LavkaClient:
                     status=resp.status_code,
                 )
             try:
-                return resp.json()
+                data = resp.json()
             except ValueError as exc:
                 raise LavkaApiError(f"Non-JSON response from {name}.") from exc
-
-        raise LavkaApiError(f"Failed to call {name}: {last_exc}")
+            # Yandex anti-bot answers 200 with a captcha instead of data. It is
+            # decided by the caller's IP (same cookies work from another network).
+            if isinstance(data, dict) and data.get("type") == "captcha":
+                raise LavkaApiError(
+                    f"Yandex anti-bot returned a captcha instead of data on {name}: "
+                    "Lavka is refusing requests from this server's IP address. "
+                    "Cookies are fine; retrying from here won't help."
+                )
+            return data
 
     # -- trimming ----------------------------------------------------------
 

@@ -10,7 +10,7 @@ import respx
 
 from yandex_lavka_mcp.client import LavkaClient
 from yandex_lavka_mcp.config import Config, Location
-from yandex_lavka_mcp.errors import LavkaAuthError
+from yandex_lavka_mcp.errors import LavkaApiError, LavkaAuthError
 
 
 def _config() -> Config:
@@ -468,3 +468,29 @@ async def test_auth_error_maps_to_lavka_auth_error():
     async with LavkaClient(_config()) as client:
         with pytest.raises(LavkaAuthError):
             await client.get_cart()
+
+
+@respx.mock
+async def test_captcha_is_an_error_not_empty_data():
+    # Yandex anti-bot answers HTTP 200 with a captcha instead of data; it used to
+    # reach the model as "nothing found" / "cart is empty".
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/search/v3/lavka").mock(
+        return_value=httpx.Response(200, json={"type": "captcha", "captcha": {"key": "k"}})
+    )
+    async with LavkaClient(_config()) as client:
+        with pytest.raises(LavkaApiError, match="captcha"):
+            await client.search("молоко")
+
+
+@respx.mock
+async def test_stale_csrf_is_refreshed_even_without_retries():
+    # A 401 on the last (here: only) attempt must still refresh the CSRF token
+    # and resend — it used to crash with NameError instead.
+    _mock_homepage()
+    route = respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        side_effect=[httpx.Response(401), httpx.Response(200, json={"ok": 1})]
+    )
+    async with LavkaClient(_config()) as client:
+        assert await client._call("cart_get", {}, retry=False) == {"ok": 1}
+    assert route.call_count == 2
