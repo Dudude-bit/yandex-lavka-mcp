@@ -573,8 +573,8 @@ async def set_payment_method(card_id: str) -> dict[str, Any]:
 async def active_orders() -> dict[str, Any]:
     """Currently tracked orders with status and ETA. Read-only.
 
-    Covers in-progress orders (Lavka's order-tracking feed). Full historical
-    order history is a separate endpoint not yet wired up.
+    Covers in-progress orders (Lavka's order-tracking feed); past orders are in
+    order_history.
     """
     try:
         orders = await _with_client(lambda c: c.tracked_orders())

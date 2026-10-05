@@ -45,6 +45,8 @@ order — with an explicit human confirmation before any money is charged.
 | `confirm_order` | **YES** | Places the order and charges the default card (or the one set above). |
 | `cancel_order` | — | Cancel an order by id. |
 | `active_orders` | — | Currently tracked orders with status/ETA. |
+| `order_history` | — | Past orders (total, items count, date), paged. |
+| `get_order` | — | One order in full: items, totals, address, status. |
 
 **Money safety.** Placing an order is a deliberate two-step flow: `checkout_preview`
 returns the full summary and charges nothing; `confirm_order(confirmed_total)`

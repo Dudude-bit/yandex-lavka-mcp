@@ -9,27 +9,11 @@ import pytest
 import respx
 
 from yandex_lavka_mcp.client import LavkaClient
-from yandex_lavka_mcp.config import Config, Location
+from fakes import config as _config
+from fakes import mock_homepage as _mock_homepage
 from yandex_lavka_mcp.errors import LavkaApiError
 
 
-def _config() -> Config:
-    return Config(
-        cookies={"Session_id": "fake"},
-        location=Location(lat=55.0, lon=37.0),
-    )
-
-
-_HOMEPAGE_HTML = (
-    '<html><script id="__page_props__-data" type="application/json">'
-    '{"csrfToken":"tok-123","x":1}</script></html>'
-)
-
-
-def _mock_homepage():
-    return respx.get("https://lavka.yandex.ru/").mock(
-        return_value=httpx.Response(200, text=_HOMEPAGE_HTML)
-    )
 
 
 _LAYOUT_RESPONSE = {
@@ -283,3 +267,8 @@ async def test_get_category_unknown_category_error_mentions_groups():
         with pytest.raises(LavkaApiError) as excinfo:
             await client.get_category("nope")
     assert "Овощной прилавок" in str(excinfo.value)
+
+
+def test_category_titles_are_cleaned_like_product_titles():
+    raw = {"id": "c1", "title": "Ово\xadщи &laquo;<notr>Из Лавки</notr>&raquo;", "deepLink": "veg"}
+    assert LavkaClient._trim_category(raw)["title"] == "Овощи «Из Лавки»"

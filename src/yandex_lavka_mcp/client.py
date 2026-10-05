@@ -75,6 +75,11 @@ def _dig(data: Any, *keys: str) -> Any:
     return cur
 
 
+def _clean_text(text: Any) -> str:
+    """Lavka marks up titles for the browser: soft hyphens, <notr>…</notr>, &laquo;."""
+    return html.unescape(re.sub(r"</?notr>", "", str(text or "").replace("\xad", "")))
+
+
 def _to_amount(value: Any) -> float | None:
     """Normalize a Lavka price value (str/int/float/None) to a float."""
     if value is None:
@@ -155,10 +160,8 @@ class LavkaClient:
 
     def _base_body(self) -> dict[str, Any]:
         """Fields Lavka wants on nearly every call."""
-        depot_type = self._ctx("depotType", "regular")
         body: dict[str, Any] = {
-            "depotType": depot_type,
-            "is_supermarket": depot_type == "supermarket",
+            "depotType": self._ctx("depotType", "regular"),
             "currencySign": self._ctx("currencySign", "₽"),
         }
         pos = self._position()
@@ -288,8 +291,7 @@ class LavkaClient:
             # `slug` (deepLink, the product page's path).
             "id": _pick(item, "id", "product_id"),
             "slug": _pick(item, "deepLink", "slug", "productId"),
-            # Lavka marks up titles for the browser: soft hyphens, <notr>…</notr>, &laquo;.
-            "title": html.unescape(re.sub(r"</?notr>", "", _pick(item, "title", "name", default="").replace("\xad", ""))),
+            "title": _clean_text(_pick(item, "title", "name")),
             "price": _to_amount(_pick(item, "currentPrice", "price", "pricePerItem")),
             "old_price": _to_amount(_pick(item, "oldPrice", "old_price")),
             "quantity_label": _pick(item, "amount", "quantity", "weight", default=""),
@@ -300,7 +302,7 @@ class LavkaClient:
     def _trim_category(info: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": _pick(info, "id"),
-            "title": _pick(info, "title", default=""),
+            "title": _clean_text(info.get("title")),
             "slug": _pick(info, "deepLink"),
             "available": bool(_pick(info, "available", default=True)),
         }
@@ -309,7 +311,7 @@ class LavkaClient:
     def _trim_cart_item(item: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": _pick(item, "id", "product_id"),
-            "title": _pick(item, "title", "name", default="").replace("\xad", ""),  # soft hyphens
+            "title": _clean_text(_pick(item, "title", "name")),
             "quantity": _pick(item, "quantity", "count", "qty", default=1),
             "price": _to_amount(_pick(item, "currentPrice", "price")),
             "quantity_label": _pick(item, "amount", "weight", default=""),
@@ -390,7 +392,7 @@ class LavkaClient:
         pm = raw.get("paymentMethod") if isinstance(raw.get("paymentMethod"), dict) else None
         if not pm:
             return None
-        card = ((pm.get("meta") or {}).get("card")) or {}
+        card = _dig(pm, "meta", "card") or {}
         return {
             "type": pm.get("type"),
             "id": pm.get("id"),
@@ -424,14 +426,14 @@ class LavkaClient:
         so with two tabs the default is unknown (None). `warning` flags a portion
         that doesn't follow from per_100g; the numbers themselves stay as sent.
         """
-        pfc = (product.get("options") or {}).get("ingredients") or {}
+        pfc = _dig(product, "options", "ingredients") or {}
         traits = [t for t in pfc.get("pfcTraits") or [] if isinstance(t, dict) and t.get("id") in _PFC_FIELDS]
         settings = pfc.get("pfcSettings") or {}
 
         def block(measure: str) -> dict[str, Any] | None:
             values: dict[str, Any] = dict.fromkeys(_PFC_FIELDS.values())
             for t in traits:
-                values[_PFC_FIELDS[t["id"]]] = _to_amount((t.get("measures") or {}).get(measure))
+                values[_PFC_FIELDS[t["id"]]] = _to_amount(_dig(t, "measures", measure))
             return values if any(v is not None for v in values.values()) else None
 
         tabs = {"per100g": block("per100g"), "per_portion": block("perPortion")}
@@ -516,7 +518,7 @@ class LavkaClient:
             groups.append(
                 {
                     "id": group_info.get("id"),
-                    "title": _pick(group_info, "title", default=""),
+                    "title": _clean_text(group_info.get("title")),
                     "slug": group_info.get("deepLink"),
                     "categories": categories,
                 }
@@ -560,7 +562,7 @@ class LavkaClient:
                 continue
             etype = entry.get("type")
             if etype == "category_group":
-                group = {"id": entry.get("id"), "title": _pick(entry, "title", default="")}
+                group = {"id": entry.get("id"), "title": _clean_text(entry.get("title"))}
             elif etype == "category":
                 categories.append(self._trim_category(entry))
         return {"layout_slug": layout_slug, "group": group, "categories": categories}
@@ -618,7 +620,7 @@ class LavkaClient:
                         category_meta.update(self._trim_category(value))
                     walk(node.get("items"), current_sub)
                 elif vtype == "subcategory":
-                    subcategories[vid] = {"id": vid, "title": _pick(value, "title", default=""), "product_ids": []}
+                    subcategories[vid] = {"id": vid, "title": _clean_text(value.get("title")), "product_ids": []}
                     walk(node.get("items"), vid)
                 elif vtype == "good" and vid:
                     top_good_ids.append(vid)
@@ -1018,20 +1020,9 @@ class LavkaClient:
         return {"status": status, "redirect_url": redirect}
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
-        """Cancel an order by id."""
-        if self._client is None:
-            raise LavkaConfigError("Client used outside of an async context.")
-        await self._ensure_csrf()
-        safe_id = quote(str(order_id), safe="")
-        resp = await self._client.post(
-            f"/api/v1/orders/{safe_id}/cancel", json={}, headers=self._lavka_headers()
-        )
-        if resp.status_code in (401, 403):
-            raise LavkaAuthError(
-                f"Lavka session is not authorized (HTTP {resp.status_code}). "
-                "Re-capture your Yandex cookies."
-            )
-        return {"order_id": order_id, "cancelled": resp.status_code < 400, "status_code": resp.status_code}
+        """Cancel an order by id. Not retried: a cancel is a write."""
+        await self._call("cancel_order", {}, retry=False, path_params={"orderId": order_id})
+        return {"order_id": order_id, "cancelled": True}
 
     # -- addresses / geo ---------------------------------------------------
 
@@ -1123,82 +1114,62 @@ class LavkaClient:
                     "status": _pick(o, "status", "state"),
                     "eta_minutes": _pick(o, "eta", "etaMinutes"),
                     "title": _pick(o, "title", "statusTitle"),
-                    "total": _pick(o, "totalPriceValue", "total", "totalPrice"),
+                    "total": _to_amount(_pick(o, "totalPriceValue", "total", "totalPrice")),
                     "items_count": _pick(o, "itemsCount", "totalItemsCount"),
                     "created_at": _pick(o, "createdAt", "created_at", "date"),
                 }
             )
         return trimmed
 
+    @staticmethod
+    def _trim_order(order: dict[str, Any]) -> dict[str, Any]:
+        """The summary fields shared by the history list and one order's detail."""
+        info = _dig(order, "deliveryInfo") or order
+        calc = _dig(order, "calculation") or {}
+        return {
+            "order_id": _pick(info, "orderId", "id"),
+            "short_order_id": _pick(info, "shortOrderId"),
+            "status": _pick(info, "status"),
+            "is_canceled": bool(_pick(info, "isCanceled", default=False)),
+            "is_failed": bool(_pick(info, "isFailed", default=False)),
+            "date": _pick(info, "date"),
+            "created_at": _pick(info, "createdAt"),
+            "address": _pick(info, "address"),
+            "items_count": len(_dig(order, "positions") or []),
+            "total": _to_amount(_dig(calc, "finalCost")),
+            "products_price": _to_amount(order.get("productsPrice")),
+            "delivery_cost": _to_amount(_dig(calc, "deliveryCost")),
+            "discount": _to_amount(_dig(calc, "discount")),
+        }
+
     async def order_history(self, limit: int = 20, last_order_id: str | None = None) -> list[dict[str, Any]]:
-        """Fetch past orders from Lavka history."""
+        """Past orders, newest first; pass the last one's id to get the next page."""
         params: dict[str, Any] = {"count": limit}
         if last_order_id:
             params["lastOrderId"] = last_order_id
         data = await self._call("order_history", params=params)
-        orders = _dig(data, "data", "orders") or []
-        trimmed = []
-        for o in orders:
-            if not isinstance(o, dict):
-                continue
-            di = _dig(o, "deliveryInfo") or o
-            calc = _dig(o, "calculation") or {}
-            positions = _dig(o, "positions") or []
-            trimmed.append(
-                {
-                    "order_id": _pick(di, "orderId", "id"),
-                    "short_order_id": _pick(di, "shortOrderId"),
-                    "status": _pick(di, "status"),
-                    "is_canceled": bool(_pick(di, "isCanceled", default=False)),
-                    "is_failed": bool(_pick(di, "isFailed", default=False)),
-                    "date": _pick(di, "date"),
-                    "created_at": _pick(di, "createdAt"),
-                    "address": _pick(di, "address"),
-                    "items_count": len(positions),
-                    "total": _to_amount(_dig(calc, "finalCost")),
-                    "products_price": _to_amount(_dig(o, "productsPrice")),
-                    "delivery_cost": _to_amount(_dig(calc, "deliveryCost")),
-                    "discount": _to_amount(_dig(calc, "discount")),
-                }
-            )
-        return trimmed
+        return [self._trim_order(o) for o in _dig(data, "data", "orders") or [] if isinstance(o, dict)]
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
-        """Fetch full details of a specific order."""
+        """One order in full: the summary plus its items."""
         raw = await self._call("order_detail", path_params={"orderId": order_id})
         data = _dig(raw, "data") or raw
-        if not isinstance(data, dict):
-            data = {}
-        di = _dig(data, "deliveryInfo") or {}
-        calc = _dig(data, "calculation") or {}
-        positions = _dig(data, "positions") or []
+        data = data if isinstance(data, dict) else {}
         items = [
             {
                 "id": _pick(p, "id"),
-                "title": _pick(p, "title", "name", default=""),
+                "title": _clean_text(_pick(p, "title", "name")),
                 "quantity": _pick(p, "count", "quantity", default=1),
                 "price": _to_amount(_pick(p, "price")),
                 "total": _to_amount(_pick(p, "totalPrice")),
                 "type": _pick(p, "type"),
             }
-            for p in positions
+            for p in _dig(data, "positions") or []
             if isinstance(p, dict)
         ]
         return {
-            "order_id": _pick(di, "orderId"),
-            "short_order_id": _pick(di, "shortOrderId"),
-            "status": _pick(di, "status"),
-            "is_canceled": bool(_pick(di, "isCanceled", default=False)),
-            "is_failed": bool(_pick(di, "isFailed", default=False)),
-            "date": _pick(di, "date"),
-            "created_at": _pick(di, "createdAt"),
-            "address": _pick(di, "address"),
+            **self._trim_order(data),
             "items": items,
-            "items_count": len(items),
-            "products_price": _to_amount(_dig(data, "productsPrice")),
-            "products_price_initial": _to_amount(_dig(data, "productsPriceInitial")),
-            "delivery_cost": _to_amount(_dig(calc, "deliveryCost")),
-            "discount": _to_amount(_dig(calc, "discount")),
-            "total": _to_amount(_dig(calc, "finalCost")),
-            "currency": _dig(calc, "currencyCode"),
+            "products_price_initial": _to_amount(data.get("productsPriceInitial")),
+            "currency": _dig(data, "calculation", "currencyCode"),
         }
