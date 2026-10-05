@@ -7,8 +7,8 @@ a small trimmed dict — never the raw Lavka payload, which is large.
 Key facts baked in:
 - Location is ``[lon, lat]`` (note the order).
 - Search returns products under ``cacheProducts``; each product's ``id`` is the
-  hash used to add it to the cart, and ``deepLink`` is the slug used for the
-  product-detail call.
+  hash used to add it to the cart, and ``deepLink`` is its slug. The
+  product-detail call takes either.
 - Cart writes need the current ``cartId`` + ``cartVersion`` (read them from the
   cart first) plus a fresh ``idempotencyToken``.
 - Order totals live in the cart response (``totalItemsPrice`` /
@@ -18,10 +18,11 @@ Key facts baked in:
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 import uuid
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -86,6 +87,30 @@ def _to_amount(value: Any) -> float | None:
         return float(str(value).replace(" ", "").replace(" ", "").replace(",", "."))
     except (TypeError, ValueError):
         return None
+
+
+_PFC_FIELDS = {"calories": "kcal", "protein": "protein", "fat": "fat", "carbohydrate": "carbs"}
+_WEIGHT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(кг|г)\b", re.IGNORECASE)
+
+
+def _grams(text: Any) -> float | None:
+    """A weight written as "50 г" / "1,2 кг", in grams; None for anything else."""
+    m = _WEIGHT_RE.search(str(text or ""))
+    if not m:
+        return None
+    value = float(m.group(1).replace(",", "."))
+    return value * 1000 if m.group(2).lower() == "кг" else value
+
+
+def _product_ref(ref: str) -> str:
+    """A product id, slug or Lavka link -> what the product API takes (id or slug)."""
+    text = unquote(ref.strip())
+    # Share links: .../external?service=grocery&href=?item=<id>:st-md...
+    m = re.search(r"[?&]item=([0-9A-Za-z]+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"/good/([^/?#]+)", text)
+    return m.group(1) if m else text
 
 
 def _new_idempotency_token() -> str:
@@ -202,21 +227,24 @@ class LavkaClient:
         max_retries = _MAX_RETRIES if retry else 0
         await self._ensure_csrf()
         csrf_refreshed = False
-        for attempt in range(max_retries + 1):
+        attempt = 0
+        while True:
             try:
                 resp = await self._client.request(
                     method, path, headers=self._lavka_headers(), **kwargs
                 )
             except httpx.HTTPError as exc:
                 if attempt < max_retries:
-                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    attempt += 1
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
                     continue
                 raise LavkaApiError(f"Network error calling {name}: {exc}") from exc
 
             if resp.status_code in (401, 403):
                 # A stale CSRF token also shows up as 401 — refresh once and retry
-                # before concluding the session itself is dead. (Safe even for
-                # non-retry calls: the request never reached a success.)
+                # before concluding the session itself is dead. Doesn't use up a
+                # retry, and is safe even for non-retry calls: the request was
+                # rejected, so it never took effect.
                 if not csrf_refreshed:
                     csrf_refreshed = True
                     await self._ensure_csrf(force=True)
@@ -226,7 +254,8 @@ class LavkaClient:
                     "Re-capture your Yandex cookies."
                 )
             if resp.status_code >= 500 and attempt < max_retries:
-                await asyncio.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
+                attempt += 1
+                await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
                 continue
             if resp.status_code >= 400:
                 # Keep the upstream body server-side; don't echo it to the caller.
@@ -235,22 +264,32 @@ class LavkaClient:
                     status=resp.status_code,
                 )
             try:
-                return resp.json()
+                data = resp.json()
             except ValueError as exc:
                 raise LavkaApiError(f"Non-JSON response from {name}.") from exc
-
-        raise LavkaApiError(f"Failed to call {name}: {last_exc}")
+            # Yandex anti-bot answers 200 with a captcha instead of data. It is
+            # decided by the caller's IP (same cookies work from another network).
+            if isinstance(data, dict) and data.get("type") == "captcha":
+                raise LavkaApiError(
+                    f"Yandex anti-bot returned a captcha instead of data on {name}: "
+                    "Lavka is refusing requests from this server's IP address (cookies are "
+                    "fine; retrying won't help). Fix: solve the captcha once through this IP "
+                    "with scripts/solve_captcha.py and set the `spravka` it prints as "
+                    "YANDEX_LAVKA_MCP_SPRAVKA."
+                )
+            return data
 
     # -- trimming ----------------------------------------------------------
 
     @staticmethod
     def _trim_product(item: dict[str, Any]) -> dict[str, Any]:
         return {
-            # `id` (a hash) is what add_to_cart needs; `slug` (deepLink) is what
-            # get_product needs.
+            # `id` (a hash) is what add_to_cart needs; get_product takes it or the
+            # `slug` (deepLink, the product page's path).
             "id": _pick(item, "id", "product_id"),
             "slug": _pick(item, "deepLink", "slug", "productId"),
-            "title": _pick(item, "title", "name", default=""),
+            # Lavka marks up titles for the browser: soft hyphens, <notr>…</notr>, &laquo;.
+            "title": html.unescape(re.sub(r"</?notr>", "", _pick(item, "title", "name", default="").replace("\xad", ""))),
             "price": _to_amount(_pick(item, "currentPrice", "price", "pricePerItem")),
             "old_price": _to_amount(_pick(item, "oldPrice", "old_price")),
             "quantity_label": _pick(item, "amount", "quantity", "weight", default=""),
@@ -270,7 +309,7 @@ class LavkaClient:
     def _trim_cart_item(item: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": _pick(item, "id", "product_id"),
-            "title": _pick(item, "title", "name", default=""),
+            "title": _pick(item, "title", "name", default="").replace("\xad", ""),  # soft hyphens
             "quantity": _pick(item, "quantity", "count", "qty", default=1),
             "price": _to_amount(_pick(item, "currentPrice", "price")),
             "quantity_label": _pick(item, "amount", "weight", default=""),
@@ -375,10 +414,68 @@ class LavkaClient:
         products = products if isinstance(products, list) else []
         return [self._trim_product(p) for p in products if isinstance(p, dict)][:limit]
 
-    async def get_product(self, slug: str) -> dict[str, Any]:
+    @staticmethod
+    def _nutrition(product: dict[str, Any]) -> dict[str, Any] | None:
+        """КБЖУ as the product card shows it: numbers passed through, never recomputed.
+
+        The portion tab exists only when some value has a portion figure (as on
+        the web card). Lavka sends no "selected tab" flag: its website opens the
+        first of pfcSettings.orderPfcBlocks and the app often opens the other one,
+        so with two tabs the default is unknown (None). `warning` flags a portion
+        that doesn't follow from per_100g; the numbers themselves stay as sent.
+        """
+        pfc = (product.get("options") or {}).get("ingredients") or {}
+        traits = [t for t in pfc.get("pfcTraits") or [] if isinstance(t, dict) and t.get("id") in _PFC_FIELDS]
+        settings = pfc.get("pfcSettings") or {}
+
+        def block(measure: str) -> dict[str, Any] | None:
+            values: dict[str, Any] = dict.fromkeys(_PFC_FIELDS.values())
+            for t in traits:
+                values[_PFC_FIELDS[t["id"]]] = _to_amount((t.get("measures") or {}).get(measure))
+            return values if any(v is not None for v in values.values()) else None
+
+        tabs = {"per100g": block("per100g"), "per_portion": block("perPortion")}
+        if not any(tabs.values()):
+            return None  # not food, or no data on the card
+        portion_grams = None
+        if tabs["per_portion"]:
+            label = settings.get("perPortionTitle")
+            tabs["per_portion"]["label"] = label
+            # "На 50 г" names its weight; "Всё блюдо" / "На упаковку" is the whole item.
+            portion_grams = _grams(label)
+            if portion_grams is None and re.search(r"упаковк|блюдо", str(label or ""), re.IGNORECASE):
+                portion_grams = _grams(product.get("amount"))
+        present = [b for b in tabs if tabs[b]]
+        default = None if len(present) > 1 else ("per_100g" if present[0] == "per100g" else "per_portion")
+        warning = None
+        per_100g, per_portion = tabs["per100g"], tabs["per_portion"]
+        if per_100g and per_portion and portion_grams:
+            # Lavka's portion is per_100g × grams / 100 truncated to 0.1; allow that
+            # plus per_100g's own rounding. Seen beyond it: 30 g values under "На 300 г".
+            tolerance = 0.1 + 0.05 * portion_grams / 100 + 1e-9
+            if any(
+                abs(per_100g[k] * portion_grams / 100 - per_portion[k]) > tolerance
+                for k in _PFC_FIELDS.values()
+                if per_100g[k] is not None and per_portion[k] is not None
+            ):
+                warning = (
+                    f"Lavka's data disagrees with itself: per_portion ({per_portion['label']}) is not "
+                    f"per_100g scaled to {portion_grams:g} g, so one of them is wrong in Lavka's "
+                    "catalog (its card shows the same). Don't log per_portion as is: ask the user, "
+                    "or use per_100g with the weight actually eaten."
+                )
+        return {
+            "per_100g": per_100g,
+            "per_portion": per_portion,
+            "default_basis": default,
+            "portion_grams": portion_grams,
+            "warning": warning,
+        }
+
+    async def get_product(self, ref: str) -> dict[str, Any]:
         body = {
             **self._base_body(),
-            "productId": slug,
+            "productId": _product_ref(ref),
             "needCatalogPaths": True,
             "isEcomboReward": False,
             "rewardPriceTemplate": "",
@@ -390,6 +487,7 @@ class LavkaClient:
         detail = self._trim_product(product)
         detail["description"] = _pick(product, "description", "longTitle", default="")
         detail["brand"] = _pick(product, "brand", default="")
+        detail["nutrition"] = self._nutrition(product)
         return detail
 
     # -- categories ---------------------------------------------------------
@@ -724,7 +822,8 @@ class LavkaClient:
         default_id = default.get("id")
         out = []
         for m in raw.get("methods") or []:
-            if not isinstance(m, dict):
+            # Lavka also lists every SBP bank (`sbp_bind_token`); checkout pays by card only.
+            if not isinstance(m, dict) or m.get("type") != "card":
                 continue
             out.append(
                 {

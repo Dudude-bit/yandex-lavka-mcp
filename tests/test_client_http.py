@@ -10,7 +10,7 @@ import respx
 
 from yandex_lavka_mcp.client import LavkaClient
 from yandex_lavka_mcp.config import Config, Location
-from yandex_lavka_mcp.errors import LavkaAuthError
+from yandex_lavka_mcp.errors import LavkaApiError, LavkaAuthError
 
 
 def _config() -> Config:
@@ -383,6 +383,8 @@ async def test_list_payment_methods_trims_and_flags_default():
                 "methods": [
                     {"id": "card-1", "type": "card", "displayName": ["MIR", "1384"], "cardBank": "TINKOFF", "availability": {"available": True}},
                     {"id": "card-2", "type": "card", "displayName": ["MIR", "7482"], "cardBank": "VTB", "availability": {"available": True}},
+                    # Lavka also lists every SBP bank (225 live); checkout only pays by card.
+                    {"id": "sbp-1", "type": "sbp_bind_token", "name": "Сбербанк", "availability": {"available": True}},
                 ],
                 "defaultMethod": {"id": "card-1"},
             },
@@ -394,6 +396,7 @@ async def test_list_payment_methods_trims_and_flags_default():
     assert info["methods"][0]["label"] == "MIR 1384"
     assert info["methods"][0]["is_default"] is True
     assert info["methods"][1]["is_default"] is False
+    assert [m["id"] for m in info["methods"]] == ["card-1", "card-2"]
 
 
 @respx.mock
@@ -468,3 +471,55 @@ async def test_auth_error_maps_to_lavka_auth_error():
     async with LavkaClient(_config()) as client:
         with pytest.raises(LavkaAuthError):
             await client.get_cart()
+
+
+@respx.mock
+async def test_captcha_is_an_error_not_empty_data():
+    # Yandex anti-bot answers HTTP 200 with a captcha instead of data; it used to
+    # reach the model as "nothing found" / "cart is empty".
+    _mock_homepage()
+    respx.post("https://lavka.yandex.ru/api/v1/providers/search/v3/lavka").mock(
+        return_value=httpx.Response(200, json={"type": "captcha", "captcha": {"key": "k"}})
+    )
+    async with LavkaClient(_config()) as client:
+        with pytest.raises(LavkaApiError, match="captcha"):
+            await client.search("молоко")
+
+
+@respx.mock
+async def test_stale_csrf_is_refreshed_even_without_retries():
+    # A 401 on the last (here: only) attempt must still refresh the CSRF token
+    # and resend — it used to crash with NameError instead.
+    _mock_homepage()
+    route = respx.post("https://lavka.yandex.ru/api/v1/providers/cart/v1/retrieve").mock(
+        side_effect=[httpx.Response(401), httpx.Response(200, json={"ok": 1})]
+    )
+    async with LavkaClient(_config()) as client:
+        assert await client._call("cart_get", {}, retry=False) == {"ok": 1}
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_get_product_by_share_link_returns_nutrition():
+    _mock_homepage()
+    route = respx.post("https://lavka.yandex.ru/api/v1/providers/v1/product").mock(
+        return_value=httpx.Response(200, json={"product": {
+            "id": "c236b75cff42468388777bdbdf523d0f000200020000",
+            "deepLink": "ogurcy-korotkoplodnye-hrustyashie-iz-lavki-300-gram",
+            "title": "Огур\xadцы хру\xadстя\xadщие <notr>Из Лавки</notr>",
+            "amount": "300 г",
+            "options": {"ingredients": {"pfcTraits": [
+                {"id": "calories", "measures": {"per100g": "15", "perPortion": "4,5"}},
+                {"id": "protein", "measures": {"per100g": "0,8", "perPortion": "0,2"}},
+                {"id": "fat", "measures": {"per100g": "0,1", "perPortion": "0"}},
+                {"id": "carbohydrate", "measures": {"per100g": "2,8", "perPortion": "0,8"}},
+            ], "pfcSettings": {"orderPfcBlocks": ["per100g", "per_portion"], "per100gTitle": "На 100 г", "perPortionTitle": "На 300 г"}}},
+        }})
+    )
+    link = "https://lavka.yandex.ru/external?service=grocery&href=?item=c236b75cff42468388777bdbdf523d0f000200020000:st-md"
+    async with LavkaClient(_config()) as client:
+        product = await client.get_product(link)
+    assert json.loads(route.calls.last.request.content)["productId"] == "c236b75cff42468388777bdbdf523d0f000200020000"
+    assert product["title"] == "Огурцы хрустящие Из Лавки"
+    assert product["nutrition"]["per_100g"] == {"kcal": 15.0, "protein": 0.8, "fat": 0.1, "carbs": 2.8}
+    assert product["nutrition"]["default_basis"] is None  # two tabs, no flag

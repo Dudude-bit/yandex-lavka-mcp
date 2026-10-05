@@ -17,6 +17,7 @@ Configuration (env vars):
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -26,18 +27,15 @@ from mcp.server.auth.settings import AuthSettings
 
 
 def _discover_jwks_url(issuer: str) -> str:
-    """Read jwks_uri from the provider's OpenID discovery document."""
+    """Read jwks_uri from the provider's OpenID discovery document.
+
+    Raises on failure — no guessed fallback: a wrong URL would be cached for the
+    process lifetime and reject every token (happened when the server booted
+    before the auth provider)."""
     well_known = issuer.rstrip("/") + "/.well-known/openid-configuration"
-    try:
-        resp = httpx.get(well_known, timeout=10.0)
-        resp.raise_for_status()
-        jwks = resp.json().get("jwks_uri")
-        if jwks:
-            return jwks
-    except (httpx.HTTPError, ValueError):
-        pass
-    # Conventional fallback.
-    return issuer.rstrip("/") + "/.well-known/jwks.json"
+    resp = httpx.get(well_known, timeout=10.0)
+    resp.raise_for_status()
+    return resp.json()["jwks_uri"]
 
 
 def _scopes_from_claims(claims: dict) -> list[str]:
@@ -56,7 +54,7 @@ class JwksTokenVerifier(TokenVerifier):
         self,
         *,
         issuer: str,
-        jwks_url: str,
+        jwks_url: str | None,
         resource_url: str | None,
         audience: str | None,
         required_scopes: list[str],
@@ -70,16 +68,25 @@ class JwksTokenVerifier(TokenVerifier):
         # call the server — the last line of defence given every request spends
         # the one deployer's Lavka session.
         self.allowed_subjects = allowed_subjects or []
-        # Imported lazily so the base (stdio) install needs no JWT deps.
-        from jwt import PyJWKClient
+        self._jwks_url = jwks_url
+        self._jwk_client = None
 
-        self._jwk_client = PyJWKClient(jwks_url)
+    def _signing_key(self, token: str):
+        # The JWKS URL is discovered on first use and retried until it succeeds,
+        # so a server that starts before its auth provider recovers on its own.
+        if self._jwk_client is None:
+            # Imported lazily so the base (stdio) install needs no JWT deps.
+            from jwt import PyJWKClient
+
+            self._jwk_client = PyJWKClient(self._jwks_url or _discover_jwks_url(self.issuer))
+        return self._jwk_client.get_signing_key_from_jwt(token)
 
     async def verify_token(self, token: str) -> AccessToken | None:
         import jwt
 
         try:
-            signing_key = self._jwk_client.get_signing_key_from_jwt(token)
+            # Blocking HTTP (discovery, key fetch) — keep it off the event loop.
+            signing_key = await asyncio.to_thread(self._signing_key, token)
             claims = jwt.decode(
                 token,
                 signing_key.key,
@@ -89,7 +96,8 @@ class JwksTokenVerifier(TokenVerifier):
                 # Require an expiry — reject tokens minted without `exp`.
                 options={"verify_aud": bool(self.audience), "require": ["exp"]},
             )
-        except Exception:  # noqa: BLE001 - any decode/verify failure = unauthorized
+        except Exception as e:  # noqa: BLE001 - any decode/verify failure = unauthorized
+            print(f"[yandex-lavka-mcp] token rejected: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             return None
 
         subject = claims.get("sub")
@@ -126,14 +134,13 @@ def build_token_verifier() -> JwksTokenVerifier | None:
     issuer = os.environ.get("YANDEX_LAVKA_MCP_OAUTH_ISSUER")
     if not issuer:
         return None
-    jwks_url = os.environ.get("YANDEX_LAVKA_MCP_OAUTH_JWKS_URL") or _discover_jwks_url(issuer)
     scopes = [s for s in (os.environ.get("YANDEX_LAVKA_MCP_OAUTH_SCOPES") or "").split() if s]
     subjects = [
         s for s in (os.environ.get("YANDEX_LAVKA_MCP_OAUTH_SUBJECTS") or "").replace(",", " ").split() if s
     ]
     return JwksTokenVerifier(
         issuer=issuer,
-        jwks_url=jwks_url,
+        jwks_url=os.environ.get("YANDEX_LAVKA_MCP_OAUTH_JWKS_URL"),
         resource_url=os.environ.get("YANDEX_LAVKA_MCP_SERVER_URL"),
         audience=os.environ.get("YANDEX_LAVKA_MCP_OAUTH_AUDIENCE"),
         required_scopes=scopes,
