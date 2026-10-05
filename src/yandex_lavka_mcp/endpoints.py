@@ -18,6 +18,12 @@ DEFAULT_ENDPOINTS: dict[str, dict[str, str]] = {
     # Catalog / search  — CONFIRMED
     "search": {"method": "POST", "path": "/api/v1/providers/search/v3/lavka"},
     "product": {"method": "POST", "path": "/api/v1/providers/v1/product"},
+    # Categories — CONFIRMED (captured 2026-08-25 from live traffic + verified
+    # live): layout returns the whole group→category menu for a storefront,
+    # category-group returns one group, category returns products+subcategories.
+    "category_tree": {"method": "POST", "path": "/api/v1/providers/v1/layout"},
+    "category_group": {"method": "POST", "path": "/api/v1/providers/v1/category-group"},
+    "category": {"method": "POST", "path": "/api/v1/providers/v2/category"},
     # Cart — CONFIRMED
     "cart_get": {"method": "POST", "path": "/api/v1/providers/cart/v1/retrieve"},
     "cart_update": {"method": "POST", "path": "/api/v1/providers/cart/v1/update"},
@@ -30,6 +36,10 @@ DEFAULT_ENDPOINTS: dict[str, dict[str, str]] = {
     "geo_geocode": {"method": "POST", "path": "/api/v1/providers/geo/v1/geocode"},
     # Orders — CONFIRMED tracking
     "tracked_orders": {"method": "GET", "path": "/api/v1/providers/orders-tracking/v1/tracked-orders"},
+    # Order history — CONFIRMED (captured 2026-08-25 from live traffic)
+    "order_history": {"method": "GET", "path": "/api/v1/orders/v1/history/list"},
+    "order_detail": {"method": "GET", "path": "/api/v1/orders/v1/history/{orderId}"},
+    "cancel_order": {"method": "POST", "path": "/api/v1/orders/{orderId}/cancel"},
     # Place order — CONFIRMED (captured 2026-07-19 from a real "Оплатить"). NOT
     # under /providers/. Submit returns {data:{orderId}} and triggers a charge on
     # the on-file card; payment then progresses via payments/v1/status and may

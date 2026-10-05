@@ -65,6 +65,21 @@ def _pick(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default
 
 
+def _dig(data: Any, *keys: str) -> Any:
+    """Recursively dive into nested dicts by keys; returns None on any miss."""
+    cur = data
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
+def _clean_text(text: Any) -> str:
+    """Lavka marks up titles for the browser: soft hyphens, <notr>…</notr>, &laquo;."""
+    return html.unescape(re.sub(r"</?notr>", "", str(text or "").replace("\xad", "")))
+
+
 def _to_amount(value: Any) -> float | None:
     """Normalize a Lavka price value (str/int/float/None) to a float."""
     if value is None:
@@ -185,15 +200,30 @@ class LavkaClient:
             self._csrf_token = match.group(1)
 
     async def _call(
-        self, name: str, payload: dict[str, Any] | None = None, *, retry: bool = True
+        self,
+        name: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        retry: bool = True,
+        params: dict[str, Any] | None = None,
+        path_params: dict[str, Any] | None = None,
     ) -> Any:
         if self._client is None:
             raise LavkaConfigError("Client used outside of an async context.")
         spec = resolve_endpoint(name, self._config.endpoints)
         method = spec["method"].upper()
+        # Resolve path placeholders and query params once, before the retry
+        # loop, so retries reuse the same values.
+        path = spec["path"]
+        if path_params:
+            path = path.format(
+                **{k: quote(str(v), safe="") for k, v in path_params.items()}
+            )
         kwargs: dict[str, Any] = {}
         if payload is not None and method != "GET":
             kwargs["json"] = payload
+        if params is not None:
+            kwargs["params"] = params
 
         # Non-idempotent writes (placing an order) must NOT be retried: a lost
         # response on a retried request could submit the order twice.
@@ -204,7 +234,7 @@ class LavkaClient:
         while True:
             try:
                 resp = await self._client.request(
-                    method, spec["path"], headers=self._lavka_headers(), **kwargs
+                    method, path, headers=self._lavka_headers(), **kwargs
                 )
             except httpx.HTTPError as exc:
                 if attempt < max_retries:
@@ -261,8 +291,7 @@ class LavkaClient:
             # `slug` (deepLink, the product page's path).
             "id": _pick(item, "id", "product_id"),
             "slug": _pick(item, "deepLink", "slug", "productId"),
-            # Lavka marks up titles for the browser: soft hyphens, <notr>…</notr>, &laquo;.
-            "title": html.unescape(re.sub(r"</?notr>", "", _pick(item, "title", "name", default="").replace("\xad", ""))),
+            "title": _clean_text(_pick(item, "title", "name")),
             "price": _to_amount(_pick(item, "currentPrice", "price", "pricePerItem")),
             "old_price": _to_amount(_pick(item, "oldPrice", "old_price")),
             "quantity_label": _pick(item, "amount", "quantity", "weight", default=""),
@@ -270,10 +299,19 @@ class LavkaClient:
         }
 
     @staticmethod
+    def _trim_category(info: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": _pick(info, "id"),
+            "title": _clean_text(info.get("title")),
+            "slug": _pick(info, "deepLink"),
+            "available": bool(_pick(info, "available", default=True)),
+        }
+
+    @staticmethod
     def _trim_cart_item(item: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": _pick(item, "id", "product_id"),
-            "title": _pick(item, "title", "name", default="").replace("\xad", ""),  # soft hyphens
+            "title": _clean_text(_pick(item, "title", "name")),
             "quantity": _pick(item, "quantity", "count", "qty", default=1),
             "price": _to_amount(_pick(item, "currentPrice", "price")),
             "quantity_label": _pick(item, "amount", "weight", default=""),
@@ -354,7 +392,7 @@ class LavkaClient:
         pm = raw.get("paymentMethod") if isinstance(raw.get("paymentMethod"), dict) else None
         if not pm:
             return None
-        card = ((pm.get("meta") or {}).get("card")) or {}
+        card = _dig(pm, "meta", "card") or {}
         return {
             "type": pm.get("type"),
             "id": pm.get("id"),
@@ -388,14 +426,14 @@ class LavkaClient:
         so with two tabs the default is unknown (None). `warning` flags a portion
         that doesn't follow from per_100g; the numbers themselves stay as sent.
         """
-        pfc = (product.get("options") or {}).get("ingredients") or {}
+        pfc = _dig(product, "options", "ingredients") or {}
         traits = [t for t in pfc.get("pfcTraits") or [] if isinstance(t, dict) and t.get("id") in _PFC_FIELDS]
         settings = pfc.get("pfcSettings") or {}
 
         def block(measure: str) -> dict[str, Any] | None:
             values: dict[str, Any] = dict.fromkeys(_PFC_FIELDS.values())
             for t in traits:
-                values[_PFC_FIELDS[t["id"]]] = _to_amount((t.get("measures") or {}).get(measure))
+                values[_PFC_FIELDS[t["id"]]] = _to_amount(_dig(t, "measures", measure))
             return values if any(v is not None for v in values.values()) else None
 
         tabs = {"per100g": block("per100g"), "per_portion": block("perPortion")}
@@ -453,6 +491,203 @@ class LavkaClient:
         detail["brand"] = _pick(product, "brand", default="")
         detail["nutrition"] = self._nutrition(product)
         return detail
+
+    # -- categories ---------------------------------------------------------
+
+    async def get_category_tree(self, *, layout_slug: str = "grocery") -> dict[str, Any]:
+        """The full category menu of a storefront: groups with their categories.
+
+        ``layout_slug`` picks the storefront: "grocery" is the main food catalog;
+        hubs like "pharmacy" (Аптека) and "pet_store" (Зоотовары) have their own.
+        Group ids feed get_category_group; category ids feed get_category.
+        """
+        body = {**self._base_body(), "layoutSlug": layout_slug}
+        raw = await self._call("category_tree", body)
+        raw = raw if isinstance(raw, dict) else {}
+        groups = []
+        for section in raw.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            group_info = _dig(section, "categoryGroup", "categoryGroupInfo")
+            group_info = group_info if isinstance(group_info, dict) else {}
+            categories = [
+                self._trim_category(c["categoryInfo"])
+                for c in section.get("categories") or []
+                if isinstance(c, dict) and isinstance(c.get("categoryInfo"), dict)
+            ]
+            groups.append(
+                {
+                    "id": group_info.get("id"),
+                    "title": _clean_text(group_info.get("title")),
+                    "slug": group_info.get("deepLink"),
+                    "categories": categories,
+                }
+            )
+        return {
+            "layout_slug": layout_slug,
+            "groups": groups,
+            "group_count": len(groups),
+            "category_count": sum(len(g["categories"]) for g in groups),
+        }
+
+    async def _find_group_for_category(
+        self, category_id: str, *, layout_slug: str
+    ) -> tuple[str | None, str | None]:
+        """Locate which group contains ``category_id`` by walking the tree."""
+        tree = await self.get_category_tree(layout_slug=layout_slug)
+        titles: list[str] = []
+        for group in tree["groups"]:
+            titles.append(f"{group['title']} ({group['id']})")
+            for cat in group["categories"]:
+                if cat.get("id") == category_id or cat.get("slug") == category_id:
+                    return group["id"], group["title"]
+        raise LavkaApiError(
+            f"Category {category_id!r} not found in the {layout_slug!r} catalog. "
+            f"Known groups: {titles}"
+        )
+
+    async def get_category_group(
+        self, group_id: str, *, layout_slug: str = "grocery"
+    ) -> dict[str, Any]:
+        """The categories inside one catalog group, by its group id."""
+        body = {**self._base_body(), "layoutSlug": layout_slug, "groupId": group_id}
+        raw = await self._call("category_group", body)
+        raw = raw if isinstance(raw, dict) else {}
+        # The response's `products` array holds tile metadata: one entry typed
+        # "category_group" (the group itself) and its categories typed "category".
+        group: dict[str, Any] = {"id": group_id, "title": ""}
+        categories: list[dict[str, Any]] = []
+        for entry in raw.get("products") or []:
+            if not isinstance(entry, dict):
+                continue
+            etype = entry.get("type")
+            if etype == "category_group":
+                group = {"id": entry.get("id"), "title": _clean_text(entry.get("title"))}
+            elif etype == "category":
+                categories.append(self._trim_category(entry))
+        return {"layout_slug": layout_slug, "group": group, "categories": categories}
+
+    async def get_category(
+        self,
+        category_id: str,
+        *,
+        group_id: str | None = None,
+        subcategory: str | None = None,
+        limit: int = 50,
+        layout_slug: str = "grocery",
+    ) -> dict[str, Any]:
+        """Products in a category + its subcategory tree.
+
+        Lavka serves whole categories here (not subcategories directly), so all
+        products of the category come back at once — pass ``subcategory`` (an id
+        or title from the result) to narrow them. Without ``group_id`` the parent
+        group is resolved via an extra tree lookup.
+        """
+        gid = group_id
+        group_title: str | None = None
+        if not gid:
+            gid, group_title = await self._find_group_for_category(
+                category_id, layout_slug=layout_slug
+            )
+            if not gid:
+                raise LavkaApiError(
+                    f"No parent group found for category {category_id!r}; pass "
+                    "group_id explicitly."
+                )
+        body = {
+            **self._base_body(),
+            "modes": ["grocery"],
+            "categoryId": category_id,
+            "categorySlugPath": {"layoutSlug": layout_slug, "groupId": gid},
+        }
+        raw = await self._call("category", body)
+        raw = raw if isinstance(raw, dict) else {}
+
+        cg = raw.get("categoryGroup") if isinstance(raw.get("categoryGroup"), dict) else {}
+        category_meta: dict[str, Any] = {}
+        subcategories: dict[str, dict[str, Any]] = {}
+        top_good_ids: list[str] = []
+
+        def walk(nodes: Any, current_sub: str | None) -> None:
+            for node in nodes if isinstance(nodes, list) else []:
+                if not isinstance(node, dict):
+                    continue
+                value = node.get("value") if isinstance(node.get("value"), dict) else {}
+                vtype = value.get("type")
+                vid = value.get("id")
+                if vtype == "category":
+                    if not category_meta:
+                        category_meta.update(self._trim_category(value))
+                    walk(node.get("items"), current_sub)
+                elif vtype == "subcategory":
+                    subcategories[vid] = {"id": vid, "title": _clean_text(value.get("title")), "product_ids": []}
+                    walk(node.get("items"), vid)
+                elif vtype == "good" and vid:
+                    top_good_ids.append(vid)
+                    if current_sub:
+                        subcategories[current_sub]["product_ids"].append(vid)
+
+        walk(raw.get("categories"), None)
+
+        products_raw = [p for p in raw.get("products") or [] if isinstance(p, dict)]
+        by_id = {_pick(p, "id"): p for p in products_raw}
+
+        chosen_ids: list[str] | None = None
+        if subcategory:
+            key = str(subcategory).strip().lower()
+            match = next(
+                (
+                    s
+                    for s in subcategories.values()
+                    if s["id"] == subcategory or s["title"].strip().lower() == key
+                ),
+                None,
+            ) or next(
+                (s for s in subcategories.values() if key in s["title"].strip().lower()),
+                None,
+            )
+            if not match:
+                names = [s["title"] for s in subcategories.values()]
+                raise LavkaApiError(
+                    f"Subcategory {subcategory!r} not found in this category. "
+                    f"Available: {names}"
+                )
+            chosen_ids = match["product_ids"]
+
+        if chosen_ids is None:
+            # The layout tree references only the first page of goods per node,
+            # so append anything the flat list has beyond it (keeps order).
+            tree_ids = list(dict.fromkeys(top_good_ids))
+            rest = [pid for pid in by_id if pid not in set(tree_ids)]
+            pool = tree_ids + rest
+        else:
+            pool = chosen_ids
+        seen: set[Any] = set()
+        ordered: list[dict[str, Any]] = []
+        total = 0
+        for pid in pool:
+            if pid in seen:
+                continue
+            seen.add(pid)
+            p = by_id.get(pid)
+            if p is None:
+                continue
+            total += 1
+            if len(ordered) < max(0, limit):
+                ordered.append(self._trim_product(p))
+
+        subs_out = [
+            {"id": s["id"], "title": s["title"], "product_count": len(s["product_ids"])}
+            for s in subcategories.values()
+        ]
+        return {
+            "layout_slug": layout_slug,
+            "category": category_meta or {"id": category_id},
+            "group": {"id": gid, "title": group_title or _pick(cg, "title", default="")},
+            "subcategories": subs_out,
+            "products": ordered,
+            "total_products": total,
+        }
 
     # -- cart --------------------------------------------------------------
 
@@ -785,20 +1020,9 @@ class LavkaClient:
         return {"status": status, "redirect_url": redirect}
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
-        """Cancel an order by id."""
-        if self._client is None:
-            raise LavkaConfigError("Client used outside of an async context.")
-        await self._ensure_csrf()
-        safe_id = quote(str(order_id), safe="")
-        resp = await self._client.post(
-            f"/api/v1/orders/{safe_id}/cancel", json={}, headers=self._lavka_headers()
-        )
-        if resp.status_code in (401, 403):
-            raise LavkaAuthError(
-                f"Lavka session is not authorized (HTTP {resp.status_code}). "
-                "Re-capture your Yandex cookies."
-            )
-        return {"order_id": order_id, "cancelled": resp.status_code < 400, "status_code": resp.status_code}
+        """Cancel an order by id. Not retried: a cancel is a write."""
+        await self._call("cancel_order", {}, retry=False, path_params={"orderId": order_id})
+        return {"order_id": order_id, "cancelled": True}
 
     # -- addresses / geo ---------------------------------------------------
 
@@ -890,6 +1114,62 @@ class LavkaClient:
                     "status": _pick(o, "status", "state"),
                     "eta_minutes": _pick(o, "eta", "etaMinutes"),
                     "title": _pick(o, "title", "statusTitle"),
+                    "total": _to_amount(_pick(o, "totalPriceValue", "total", "totalPrice")),
+                    "items_count": _pick(o, "itemsCount", "totalItemsCount"),
+                    "created_at": _pick(o, "createdAt", "created_at", "date"),
                 }
             )
         return trimmed
+
+    @staticmethod
+    def _trim_order(order: dict[str, Any]) -> dict[str, Any]:
+        """The summary fields shared by the history list and one order's detail."""
+        info = _dig(order, "deliveryInfo") or order
+        calc = _dig(order, "calculation") or {}
+        return {
+            "order_id": _pick(info, "orderId", "id"),
+            "short_order_id": _pick(info, "shortOrderId"),
+            "status": _pick(info, "status"),
+            "is_canceled": bool(_pick(info, "isCanceled", default=False)),
+            "is_failed": bool(_pick(info, "isFailed", default=False)),
+            "date": _pick(info, "date"),
+            "created_at": _pick(info, "createdAt"),
+            "address": _pick(info, "address"),
+            "items_count": len(_dig(order, "positions") or []),
+            "total": _to_amount(_dig(calc, "finalCost")),
+            "products_price": _to_amount(order.get("productsPrice")),
+            "delivery_cost": _to_amount(_dig(calc, "deliveryCost")),
+            "discount": _to_amount(_dig(calc, "discount")),
+        }
+
+    async def order_history(self, limit: int = 20, last_order_id: str | None = None) -> list[dict[str, Any]]:
+        """Past orders, newest first; pass the last one's id to get the next page."""
+        params: dict[str, Any] = {"count": limit}
+        if last_order_id:
+            params["lastOrderId"] = last_order_id
+        data = await self._call("order_history", params=params)
+        return [self._trim_order(o) for o in _dig(data, "data", "orders") or [] if isinstance(o, dict)]
+
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        """One order in full: the summary plus its items."""
+        raw = await self._call("order_detail", path_params={"orderId": order_id})
+        data = _dig(raw, "data") or raw
+        data = data if isinstance(data, dict) else {}
+        items = [
+            {
+                "id": _pick(p, "id"),
+                "title": _clean_text(_pick(p, "title", "name")),
+                "quantity": _pick(p, "count", "quantity", default=1),
+                "price": _to_amount(_pick(p, "price")),
+                "total": _to_amount(_pick(p, "totalPrice")),
+                "type": _pick(p, "type"),
+            }
+            for p in _dig(data, "positions") or []
+            if isinstance(p, dict)
+        ]
+        return {
+            **self._trim_order(data),
+            "items": items,
+            "products_price_initial": _to_amount(data.get("productsPriceInitial")),
+            "currency": _dig(data, "calculation", "currencyCode"),
+        }

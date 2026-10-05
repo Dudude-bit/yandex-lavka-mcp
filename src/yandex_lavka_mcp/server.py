@@ -287,6 +287,74 @@ async def get_product(product: str) -> dict[str, Any]:
         return _err(exc)
 
 
+@mcp.tool()
+async def list_categories(layout_slug: str = "grocery") -> dict[str, Any]:
+    """Browse the Lavka catalog menu: category groups with their categories.
+
+    Returns every `group` (id, title) and its `categories` (id, title) — use a
+    category id with get_category_products. `layout_slug` picks the storefront:
+    "grocery" (default) is the main food catalog; hubs like "pharmacy" (Аптека)
+    and "pet_store" (Зоотовары) have their own. Read-only.
+    """
+    try:
+        tree = await _with_client(lambda c: c.get_category_tree(layout_slug=layout_slug))
+        return {"ok": True, **tree}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def get_category_group(
+    group_id: str, layout_slug: str = "grocery"
+) -> dict[str, Any]:
+    """List the categories inside one catalog group, by group id.
+
+    Group ids come from list_categories (each group carries an id). Read-only.
+    """
+    try:
+        group = await _with_client(
+            lambda c: c.get_category_group(group_id, layout_slug=layout_slug)
+        )
+        return {"ok": True, **group}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def get_category_products(
+    category_id: str,
+    subcategory: str | None = None,
+    limit: int = 50,
+    group_id: str | None = None,
+    layout_slug: str = "grocery",
+) -> dict[str, Any]:
+    """List products in a catalog category. Read-only.
+
+    Get `category_id` from list_categories or get_category_group. Returns the
+    category's `subcategories` (id, title, product_count) plus up to `limit`
+    products sorted as Lavka shows them — raise the limit to page further using
+    `total_products`. Each result's `id` works with add_to_cart and its `slug`
+    with get_product.
+
+    Pass `subcategory` (an id or title from the result) to see only that shelf.
+    `group_id`/`layout_slug` are only needed for non-grocery storefronts; without
+    group_id the parent group is resolved via one extra lookup.
+    """
+    try:
+        result = await _with_client(
+            lambda c: c.get_category(
+                category_id,
+                group_id=group_id,
+                subcategory=subcategory,
+                limit=limit,
+                layout_slug=layout_slug,
+            )
+        )
+        return {"ok": True, **result}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 # -- cart ------------------------------------------------------------------
 
 
@@ -505,12 +573,44 @@ async def set_payment_method(card_id: str) -> dict[str, Any]:
 async def active_orders() -> dict[str, Any]:
     """Currently tracked orders with status and ETA. Read-only.
 
-    Covers in-progress orders (Lavka's order-tracking feed). Full historical
-    order history is a separate endpoint not yet wired up.
+    Covers in-progress orders (Lavka's order-tracking feed); past orders are in
+    order_history.
     """
     try:
         orders = await _with_client(lambda c: c.tracked_orders())
         return {"ok": True, "orders": orders}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def order_history(limit: int = 20, last_order_id: str | None = None) -> dict[str, Any]:
+    """Get list of past orders. Read-only.
+
+    Use last_order_id from the last result for pagination (pass it as last_order_id
+    to fetch the next page). Returns order id, status, total, items count, date.
+    """
+    try:
+        orders = await _with_client(
+            lambda c: c.order_history(limit=limit, last_order_id=last_order_id),
+            require_location=False,
+        )
+        return {"ok": True, "orders": orders}
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool()
+async def get_order(order_id: str) -> dict[str, Any]:
+    """Get full details of a specific order: items, totals, address, status, payment.
+
+    Pass an order_id from order_history or active_orders.
+    """
+    try:
+        order = await _with_client(
+            lambda c: c.get_order(order_id), require_location=False
+        )
+        return {"ok": True, "order": order}
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
