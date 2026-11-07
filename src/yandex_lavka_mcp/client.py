@@ -483,7 +483,7 @@ class LavkaClient:
         for b in blocks if isinstance(blocks, list) else []:
             if not isinstance(b, dict):
                 continue
-            if b.get("title") == "Полный состав" and isinstance(b.get("value"), str):
+            if str(b.get("title") or "").strip() == "Полный состав" and isinstance(b.get("value"), str):
                 full = b["value"].strip()
             if b.get("type") == "aiIngredients":
                 for it in b.get("items") or []:
@@ -1159,6 +1159,7 @@ class LavkaClient:
 
     @staticmethod
     def _trim_order_item(p: dict[str, Any]) -> dict[str, Any]:
+        """One order line in the shape shared by order_history and get_order."""
         return {
             "id": _pick(p, "productId", "positionId", "id"),
             "title": _clean_text(_pick(p, "name", "title")),

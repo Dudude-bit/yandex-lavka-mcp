@@ -493,7 +493,7 @@ async def test_get_product_by_share_link_returns_nutrition():
             "title": "Огур\xadцы хру\xadстя\xadщие <notr>Из Лавки</notr>",
             "amount": "300 г",
             "descriptionBlocks": [
-                {"title": "Полный состав", "type": "text", "value": "Огурцы, соль."},
+                {"title": "Полный состав ", "type": "text", "value": "Огурцы, соль."},
                 {"title": "Срок годности, условия хранения ", "type": "text", "value": "3 сут"},
                 {"title": "Производитель, страна", "type": "text", "value": "ОАО «Теплицы», Россия"},
             ],
