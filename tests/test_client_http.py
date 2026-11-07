@@ -494,6 +494,7 @@ async def test_get_product_by_share_link_returns_nutrition():
             "amount": "300 г",
             "descriptionBlocks": [
                 {"title": "Полный состав ", "type": "text", "value": "Огурцы, соль."},
+                {"title": "Полный состав", "type": "text", "value": "   "},
                 {"title": "Срок годности, условия хранения ", "type": "text", "value": "3 сут"},
                 {"title": "Производитель, страна", "type": "text", "value": "ОАО «Теплицы», Россия"},
             ],

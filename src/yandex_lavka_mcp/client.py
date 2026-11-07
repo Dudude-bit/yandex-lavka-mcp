@@ -483,7 +483,11 @@ class LavkaClient:
         for b in blocks if isinstance(blocks, list) else []:
             if not isinstance(b, dict):
                 continue
-            if str(b.get("title") or "").strip() == "Полный состав" and isinstance(b.get("value"), str):
+            if (
+                str(b.get("title") or "").strip() == "Полный состав"
+                and isinstance(b.get("value"), str)
+                and b["value"].strip()
+            ):
                 full = b["value"].strip()
             if b.get("type") == "aiIngredients":
                 for it in b.get("items") or []:
