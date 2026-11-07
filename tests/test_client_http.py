@@ -492,12 +492,19 @@ async def test_get_product_by_share_link_returns_nutrition():
             "deepLink": "ogurcy-korotkoplodnye-hrustyashie-iz-lavki-300-gram",
             "title": "Огур\xadцы хру\xadстя\xadщие <notr>Из Лавки</notr>",
             "amount": "300 г",
+            "descriptionBlocks": [
+                {"title": "Полный состав ", "type": "text", "value": "Огурцы, соль."},
+                {"title": "Полный состав", "type": "text", "value": "   "},
+                {"title": "Срок годности, условия хранения ", "type": "text", "value": "3 сут"},
+                {"title": "Производитель, страна", "type": "text", "value": "ОАО «Теплицы», Россия"},
+            ],
             "options": {"ingredients": {"pfcTraits": [
                 {"id": "calories", "measures": {"per100g": "15", "perPortion": "4,5"}},
                 {"id": "protein", "measures": {"per100g": "0,8", "perPortion": "0,2"}},
                 {"id": "fat", "measures": {"per100g": "0,1", "perPortion": "0"}},
                 {"id": "carbohydrate", "measures": {"per100g": "2,8", "perPortion": "0,8"}},
-            ], "pfcSettings": {"orderPfcBlocks": ["per100g", "per_portion"], "per100gTitle": "На 100 г", "perPortionTitle": "На 300 г"}}},
+            ], "pfcSettings": {"orderPfcBlocks": ["per100g", "per_portion"], "per100gTitle": "На 100 г", "perPortionTitle": "На 300 г"}},
+                "attributes": {"mainAllergens": ["milk"], "importantIngredients": ["sugar"]}},
         }})
     )
     link = "https://lavka.yandex.ru/external?service=grocery&href=?item=c236b75cff42468388777bdbdf523d0f000200020000:st-md"
@@ -507,50 +514,72 @@ async def test_get_product_by_share_link_returns_nutrition():
     assert product["title"] == "Огурцы хрустящие Из Лавки"
     assert product["nutrition"]["per_100g"] == {"kcal": 15.0, "protein": 0.8, "fat": 0.1, "carbs": 2.8}
     assert product["nutrition"]["default_basis"] is None  # two tabs, no flag
+    assert product["composition"] == "Огурцы, соль."
+    assert product["description_blocks"] == {
+        "Срок годности, условия хранения": "3 сут",
+        "Производитель, страна": "ОАО «Теплицы», Россия",
+    }
+    assert product["allergens"] == ["milk"]
 
 
 def _history_order(order_id: str, **extra) -> dict:
-    """Shaped like the live orders/v1/history responses (2026-10-05)."""
+    """Shaped like the live POST order-log/v1/retrieve responses (2026-11-07)."""
     return {
-        "deliveryInfo": {"orderId": order_id, "shortOrderId": "123-456", "status": "closed", "isCanceled": False,
-                         "isFailed": False, "date": "2026-10-01", "createdAt": "2026-10-01T10:00:00+03:00",
-                         "address": "Тверская, 1"},
-        "calculation": {"finalCost": "1 423", "deliveryCost": "119", "discount": "120", "currencyCode": "RUB"},
+        "orderId": order_id, "shortOrderId": "123-456", "status": "closed", "statusText": "Доставлен",
+        "createdAt": "2026-10-01T10:00:00+03:00", "closedAt": "2026-10-01T11:00:00+03:00",
+        "destinations": [{"shortText": "Тверская, 1"}],
+        "calculation": {"finalCost": "1 423", "deliveryCost": "119", "discount": "120", "currencyCode": "RUB",
+                        "items": [{"name": "Огур\xadцы <notr>Из Лавки</notr>", "count": 2, "cost": "239",
+                                   "fullPrice": "239", "totalPrice": "478",
+                                   "productId": "p1", "positionId": "p1"}]},
         "productsPrice": "1424",
-        "positions": [{"id": "p1", "title": "Огур\xadцы <notr>Из Лавки</notr>", "count": 2, "price": "239", "totalPrice": "478", "type": "product"}],
         **extra,
+    }
+
+
+def _history_summary(order_id: str = "ord-1") -> dict:
+    return {
+        "order_id": order_id, "short_order_id": "123-456", "status": "closed", "status_text": "Доставлен",
+        "is_canceled": False,
+        "date": "2026-10-01", "created_at": "2026-10-01T10:00:00+03:00", "closed_at": "2026-10-01T11:00:00+03:00",
+        "address": "Тверская, 1", "items_count": 1,
+        "items": [{"id": "p1", "title": "Огурцы Из Лавки", "quantity": 2, "price": 239.0, "total": 478.0, "type": None}],
+        "total": 1423.0, "products_price": 1424.0,
+        "delivery_cost": 119.0, "discount": 120.0,
     }
 
 
 @respx.mock
 async def test_order_history_pages_and_trims():
     _mock_homepage()
-    route = respx.get("https://lavka.yandex.ru/api/v1/orders/v1/history/list").mock(
-        return_value=httpx.Response(200, json={"data": {"orders": [_history_order("ord-1"), _history_order("ord-2")]}})
+    route = respx.post("https://lavka.yandex.ru/api/v1/providers/order-log/v1/retrieve").mock(
+        return_value=httpx.Response(200, json={"orders": [_history_order("ord-1"), _history_order("ord-2")],
+                                               "tabs": {"deliveryOrders": {}}})
     )
     async with LavkaClient(_config()) as client:
         orders = await client.order_history(limit=2, last_order_id="ord-0")
-    assert dict(route.calls.last.request.url.params) == {"count": "2", "lastOrderId": "ord-0"}
+    body = json.loads(route.calls.last.request.content)
+    # one extra is requested so the end of history is detectable; only `limit` come back
+    assert body == {"range": {"count": 3, "olderThan": "ord-0"}, "includeServiceMetadata": False}
     assert [o["order_id"] for o in orders] == ["ord-1", "ord-2"]
-    assert orders[0] == {
-        "order_id": "ord-1", "short_order_id": "123-456", "status": "closed", "is_canceled": False,
-        "is_failed": False, "date": "2026-10-01", "created_at": "2026-10-01T10:00:00+03:00",
-        "address": "Тверская, 1", "items_count": 1, "total": 1423.0, "products_price": 1424.0,
-        "delivery_cost": 119.0, "discount": 120.0,
-    }
+    assert orders[0] == _history_summary("ord-1")
 
 
 @respx.mock
 async def test_get_order_quotes_the_id_and_shares_the_summary():
     _mock_homepage()
-    route = respx.get("https://lavka.yandex.ru/api/v1/orders/v1/history/ord%2F1").mock(
-        return_value=httpx.Response(200, json={"data": _history_order("ord/1", productsPriceInitial="1544")})
+    route = respx.post("https://lavka.yandex.ru/api/v1/providers/order-log/v1/retrieve").mock(
+        return_value=httpx.Response(200, json={"orders": [_history_order("ord/1", productsPriceInitial="1544")]})
     )
     async with LavkaClient(_config()) as client:
         order = await client.get_order("ord/1")
-    assert route.called  # the id is path-escaped, not spliced in raw
+    body = json.loads(route.calls.last.request.content)
+    assert body == {"range": {"orderId": "ord/1"}, "includeServiceMetadata": False}
+    assert route.called
     assert order["total"] == 1423.0 and order["currency"] == "RUB" and order["products_price_initial"] == 1544.0
-    assert order["items"] == [{"id": "p1", "title": "Огурцы Из Лавки", "quantity": 2, "price": 239.0, "total": 478.0, "type": "product"}]
+    assert order["items"] == _history_summary()["items"]
+    assert order["closed_at"] == "2026-10-01T11:00:00+03:00" and order["status_text"] == "Доставлен"
+    assert "is_failed" not in order  # dropped: the new API has no such field
 
 
 @respx.mock

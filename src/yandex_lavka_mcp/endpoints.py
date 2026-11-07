@@ -36,9 +36,14 @@ DEFAULT_ENDPOINTS: dict[str, dict[str, str]] = {
     "geo_geocode": {"method": "POST", "path": "/api/v1/providers/geo/v1/geocode"},
     # Orders — CONFIRMED tracking
     "tracked_orders": {"method": "GET", "path": "/api/v1/providers/orders-tracking/v1/tracked-orders"},
-    # Order history — CONFIRMED (captured 2026-08-25 from live traffic)
-    "order_history": {"method": "GET", "path": "/api/v1/orders/v1/history/list"},
-    "order_detail": {"method": "GET", "path": "/api/v1/orders/v1/history/{orderId}"},
+    # Order history — CONFIRMED (verified 2026-11-07 in logged-in Playwright:
+    # the /history page hydrates from POST order-log/v1/retrieve; the old
+    # GET /orders/v1/history/* now returns 404). List and detail share the
+    # endpoint; the list passes range={count, olderThan?}, the detail passes
+    # range={orderId}. userIdentity is not needed: the server scopes history
+    # to the session cookies (verified with and without it).
+    "order_history": {"method": "POST", "path": "/api/v1/providers/order-log/v1/retrieve"},
+    "order_detail": {"method": "POST", "path": "/api/v1/providers/order-log/v1/retrieve"},
     "cancel_order": {"method": "POST", "path": "/api/v1/orders/{orderId}/cancel"},
     # Place order — CONFIRMED (captured 2026-07-19 from a real "Оплатить"). NOT
     # under /providers/. Submit returns {data:{orderId}} and triggers a charge on

@@ -474,6 +474,42 @@ class LavkaClient:
             "warning": warning,
         }
 
+    @staticmethod
+    def _composition(product: dict[str, Any]) -> str:
+        """Full ingredient list: the «Полный состав» block, else the AI short one."""
+        full = ""
+        short = ""
+        blocks = product.get("descriptionBlocks")
+        for b in blocks if isinstance(blocks, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if (
+                str(b.get("title") or "").strip() == "Полный состав"
+                and isinstance(b.get("value"), str)
+                and b["value"].strip()
+            ):
+                full = b["value"].strip()
+            if b.get("type") == "aiIngredients":
+                for it in b.get("items") or []:
+                    if isinstance(it, dict) and it.get("text"):
+                        short = str(it["text"]).strip()
+                        break
+        return full or short or ""
+
+    @staticmethod
+    def _description_blocks(product: dict[str, Any]) -> dict[str, str]:
+        """Named text blocks from the card: shelf life, producer, brand, ..."""
+        out: dict[str, str] = {}
+        blocks = product.get("descriptionBlocks")
+        for b in blocks if isinstance(blocks, list) else []:
+            if not isinstance(b, dict) or b.get("type") != "text":
+                continue
+            title = str(b.get("title") or "").strip()
+            value = b.get("value")
+            if title and title != "Полный состав" and isinstance(value, str) and value.strip():
+                out[title] = value.strip()
+        return out
+
     async def get_product(self, ref: str) -> dict[str, Any]:
         body = {
             **self._base_body(),
@@ -489,6 +525,10 @@ class LavkaClient:
         detail = self._trim_product(product)
         detail["description"] = _pick(product, "description", "longTitle", default="")
         detail["brand"] = _pick(product, "brand", default="")
+        detail["composition"] = self._composition(product)
+        detail["description_blocks"] = self._description_blocks(product)
+        attrs = _dig(product, "options", "attributes") or {}
+        detail["allergens"] = list(attrs.get("mainAllergens") or [])
         detail["nutrition"] = self._nutrition(product)
         return detail
 
@@ -1122,54 +1162,104 @@ class LavkaClient:
         return trimmed
 
     @staticmethod
+    def _trim_order_item(p: dict[str, Any]) -> dict[str, Any]:
+        """One order line in the shape shared by order_history and get_order."""
+        return {
+            "id": _pick(p, "productId", "positionId", "id"),
+            "title": _clean_text(_pick(p, "name", "title")),
+            "quantity": _pick(p, "count", "quantity", default=1),
+            "price": _to_amount(_pick(p, "cost", "fullPrice", "price")),
+            "total": _to_amount(_pick(p, "totalPrice", "cost")),
+            "type": _pick(p, "type"),
+        }
+
+    @staticmethod
     def _trim_order(order: dict[str, Any]) -> dict[str, Any]:
-        """The summary fields shared by the history list and one order's detail."""
+        """The summary fields shared by the history list and one order's detail.
+
+        Shapes: the live ``POST order-log/v1/retrieve`` order is flat
+        (``orderId``/``shortOrderId``/``status``/``createdAt`` on top level,
+        address in ``destinations[0].shortText``, lines in
+        ``calculation.items``); the old ``deliveryInfo`` wrapper is still
+        accepted so config-endpoint overrides keep working.
+        """
         info = _dig(order, "deliveryInfo") or order
-        calc = _dig(order, "calculation") or {}
+        calc = _dig(order, "calculation") or _dig(info, "calculation") or {}
+        status = _pick(info, "status", "state")
+        created_at = _pick(info, "createdAt", "created_at", "date")
+        date = _pick(info, "date")
+        if date is None and isinstance(created_at, str):
+            date = created_at[:10]
+        address = _pick(info, "address")
+        if address is None:
+            dests = _dig(order, "destinations") or _dig(info, "destinations") or []
+            if isinstance(dests, list) and dests and isinstance(dests[0], dict):
+                address = _pick(dests[0], "shortText", "shortAddress")
+        raw_items = _dig(calc, "items")
+        if raw_items is None:
+            raw_items = _dig(order, "positions") or _dig(info, "positions") or []
+        items = [LavkaClient._trim_order_item(p) for p in raw_items if isinstance(p, dict)]
+        total = _to_amount(_pick(calc, "finalCost", "total", "totalPrice"))
+        if total is None:
+            total = _to_amount(_pick(order, "cartTotalPrice", "totalPriceValue", "total"))
+        delivery_cost = _to_amount(_pick(calc, "deliveryCost"))
+        if delivery_cost is None:
+            delivery_cost = _to_amount(_pick(order, "deliveryCost"))
         return {
             "order_id": _pick(info, "orderId", "id"),
             "short_order_id": _pick(info, "shortOrderId"),
-            "status": _pick(info, "status"),
-            "is_canceled": bool(_pick(info, "isCanceled", default=False)),
-            "is_failed": bool(_pick(info, "isFailed", default=False)),
-            "date": _pick(info, "date"),
-            "created_at": _pick(info, "createdAt"),
-            "address": _pick(info, "address"),
-            "items_count": len(_dig(order, "positions") or []),
-            "total": _to_amount(_dig(calc, "finalCost")),
-            "products_price": _to_amount(order.get("productsPrice")),
-            "delivery_cost": _to_amount(_dig(calc, "deliveryCost")),
-            "discount": _to_amount(_dig(calc, "discount")),
+            "status": status,
+            "status_text": _pick(info, "statusText"),
+            "is_canceled": bool(_pick(info, "isCanceled", default=False))
+            or (isinstance(status, str) and status.lower() in ("canceled", "cancelled")),
+            "date": date,
+            "created_at": created_at,
+            "closed_at": _pick(info, "closedAt", "closed_at"),
+            "address": address,
+            "items_count": len(items),
+            "items": items,
+            "total": total,
+            "products_price": _to_amount(_pick(order, "productsPrice")),
+            "delivery_cost": delivery_cost,
+            "discount": _to_amount(_pick(calc, "discount")),
         }
 
     async def order_history(self, limit: int = 20, last_order_id: str | None = None) -> list[dict[str, Any]]:
-        """Past orders, newest first; pass the last one's id to get the next page."""
-        params: dict[str, Any] = {"count": limit}
+        """Past orders, newest first; pass the last one's id to get the next page.
+
+        Live ``POST order-log/v1/retrieve`` takes ``range={count, olderThan?}``
+        and answers ``{"orders": [...], "tabs": {...}}`` directly (no ``data``
+        wrapper). One extra order is requested so the end is detectable; only
+        ``limit`` are returned. No ``userIdentity`` is sent — the server scopes
+        history to the session cookies (verified live with and without it).
+        """
+        request_range: dict[str, Any] = {"count": limit + 1}
         if last_order_id:
-            params["lastOrderId"] = last_order_id
-        data = await self._call("order_history", params=params)
-        return [self._trim_order(o) for o in _dig(data, "data", "orders") or [] if isinstance(o, dict)]
+            request_range["olderThan"] = last_order_id
+        data = await self._call(
+            "order_history",
+            {"range": request_range, "includeServiceMetadata": False},
+        )
+        orders = _dig(data, "orders") or _dig(data, "data", "orders") or []
+        if not isinstance(orders, list):
+            orders = []
+        return [self._trim_order(o) for o in orders[:limit] if isinstance(o, dict)]
 
     async def get_order(self, order_id: str) -> dict[str, Any]:
-        """One order in full: the summary plus its items."""
-        raw = await self._call("order_detail", path_params={"orderId": order_id})
-        data = _dig(raw, "data") or raw
-        data = data if isinstance(data, dict) else {}
-        items = [
-            {
-                "id": _pick(p, "id"),
-                "title": _clean_text(_pick(p, "title", "name")),
-                "quantity": _pick(p, "count", "quantity", default=1),
-                "price": _to_amount(_pick(p, "price")),
-                "total": _to_amount(_pick(p, "totalPrice")),
-                "type": _pick(p, "type"),
-            }
-            for p in _dig(data, "positions") or []
-            if isinstance(p, dict)
-        ]
+        """One order in full: the summary (with items) plus money details."""
+        data = await self._call(
+            "order_detail",
+            {"range": {"orderId": order_id}, "includeServiceMetadata": False},
+        )
+        orders = _dig(data, "orders") or _dig(data, "data", "orders") or []
+        if orders and isinstance(orders[0], dict):
+            full: dict[str, Any] = orders[0]
+        else:
+            full = _dig(data, "data") or data
+            full = full if isinstance(full, dict) else {}
+        calc = _dig(full, "calculation") or {}
         return {
-            **self._trim_order(data),
-            "items": items,
-            "products_price_initial": _to_amount(data.get("productsPriceInitial")),
-            "currency": _dig(data, "calculation", "currencyCode"),
+            **self._trim_order(full),
+            "products_price_initial": _to_amount(full.get("productsPriceInitial")),
+            "currency": _dig(calc, "currencyCode"),
         }
